@@ -10,8 +10,8 @@ rollout pool. This is a text-only recipe; the vision tower and MTP head are not 
 
 ## Environment
 
-Use a new image rather than modifying an existing training environment. The initial
-candidate is the upstream image published as `dev-202610161956`, pinned by digest:
+Use a new image rather than modifying an existing training environment. The tested
+image is the upstream image published as `dev-202610161956`, pinned by digest:
 
 ```bash
 singularity pull miles.sif docker://radixark/miles@sha256:cb92aa30af0851927a87e8f53a32276a5d4aae6a2d194ef1dba7321e8f6a307a
@@ -90,14 +90,26 @@ responses and alternating synthetic rewards. This guarantees nonzero learning
 signal without paying a judge to grade truncated proofs. HTTP judge behavior has
 separate unit tests. The smoke also checks trainer-to-rollout weights and saves a
 checkpoint and verifies that restarting advances it. It is not a baseline result or a long-context capacity test.
+Before synthetic training, preflight sends a known-answer probe to each configured
+judge and requires a successful score. This verifies live rubric and binary scoring
+without treating the synthetic training rewards as an end-to-end judge evaluation.
 
 Set `MILES_MODEL_NAME=Qwen3.5-122B-A10B` for the full-size MoE smoke. This uses
-all eight GPUs with colocated training/rollout, TP2/EP8 training, TP8 inference,
+all eight GPUs with colocated training/rollout, TP4/EP8 training, TP8 inference,
 rollout routing replay, and one short update. It saves model weights only; the
 9B smoke covers optimizer checkpoint restart. Colocation requires `retract`
 pauses and publishing weights after every update, unlike the disaggregated
-baseline. To bound host memory, it reconstructs training weights from the optimizer's
-master weights between phases, with the built-in bitwise reconstruction check enabled.
+baseline. CPU Adam's full gradient copy exceeds the single node's host-memory
+budget. This smoke instead executes precision-aware GPU Adam with chunked CPU
+state offload, FP32 moments, and exact master weights stored using TE's parameter
+remainders. This avoids a full CPU gradient copy and limits GPU moment residency
+to small windows. The 9B recipe retains CPU optimizer offload. GPU capacity must
+include the first optimizer step, not just loading and backward.
+The model-only smoke checkpoint uses `--streaming-model-checkpoint-save` to write
+tensors incrementally through PyTorch's synchronous writer. It preserves Megatron's
+distributed checkpoint keys and shard metadata while avoiding a full additional
+CPU staging copy. This option requires synchronous, persistent, model-only saves;
+the 9B optimizer checkpoint path is unchanged.
 The 122B production topology is deliberately not selected by this recipe.
 
 For the 100-update 9B baseline, `examples/platforms/abci/train.pbs` allocates two nodes and invokes `tools/abci/launch.py` with

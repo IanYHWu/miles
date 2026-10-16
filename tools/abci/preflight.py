@@ -16,13 +16,30 @@ from miles.rollout.llm_judge import JudgeRuntime
 from miles.utils.processing_utils import load_tokenizer
 
 
+async def _probe_judges(runtime):
+    for kind in runtime.judges:
+        score = await asyncio.wait_for(
+            runtime.score(
+                SimpleNamespace(
+                    response="</think>2",
+                    label={"ground_truth": "Total: 7 points. Award all 7 points for the answer 2; otherwise 0."},
+                    metadata={"raw_problem": "What is 1 + 1?", "score_type": kind, "reference_answer": "2"},
+                )
+            ),
+            timeout=60,
+        )
+        if score["score"] != 1.0 or score["judged"] != 1.0:
+            raise RuntimeError(f"Known-answer live {kind} judge probe failed: {score}")
+        print(f"Live {kind} judge probe passed", flush=True)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model-dir", required=True)
     p.add_argument("--data-dir", required=True)
     p.add_argument("--judge-config", required=True)
     p.add_argument("--model-name", default="Qwen3.5-9B")
-    p.add_argument("--probe-judge", action="store_true", help="Make one live judge call on a known-answer fixture")
+    p.add_argument("--probe-judge", action="store_true", help="Probe each configured judge on a known-answer fixture")
     args = p.parse_args()
     model = Path(args.model_dir) / args.model_name
     tokenizer = load_tokenizer(str(model), local_files_only=True)
@@ -67,21 +84,7 @@ def main():
     if not os.environ.get(cfg.get("api_key_env", "LLM_JUDGE_API_KEY")):
         raise ValueError("Judge credential missing")
     if args.probe_judge:
-        score = asyncio.run(
-            asyncio.wait_for(
-                runtime.score(
-                    SimpleNamespace(
-                        response="</think>2",
-                        label={"ground_truth": "Award 1 point for the answer 2."},
-                        metadata={"raw_problem": "What is 1 + 1?", "score_type": "binary", "reference_answer": "2"},
-                    )
-                ),
-                timeout=60,
-            )
-        )
-        if score["score"] != 1.0 or score["judged"] != 1.0:
-            raise RuntimeError(f"Known-answer live judge probe failed: {score}")
-        print("Live judge probe passed", flush=True)
+        asyncio.run(_probe_judges(runtime))
 
 
 if __name__ == "__main__":

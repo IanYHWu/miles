@@ -66,7 +66,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
             if self.model_name == "Qwen3.5-122B-A10B":
                 # Colocation fits the full 122B model on the one-node test budget.
                 self.actor_gpus, self.rollout_gpus = 8, 8
-                self.train_tp, self.rollout_tp = 2, 8
+                self.train_tp, self.rollout_tp = 4, 8
                 self.samples_per_prompt = 4
                 self.update_interval, self.num_rollout = 1, 1
         if self.actor_gpus % self.train_tp or self.rollout_gpus % self.rollout_tp:
@@ -102,8 +102,7 @@ def _train_args(args):
     )
     optimizer = (
         f"--optimizer adam --lr {args.lr} --lr-decay-style constant --weight-decay 0.01 "
-        "--adam-beta1 0.9 --adam-beta2 0.999 --clip-grad 1 --optimizer-cpu-offload "
-        "--overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
+        "--adam-beta1 0.9 --adam-beta2 0.999 --clip-grad 1 "
     )
     performance = (
         f"--seed 42 --tensor-model-parallel-size {args.train_tp} --sequence-parallel "
@@ -120,11 +119,17 @@ def _train_args(args):
     )
     if colocate:
         engines += "--colocate --use-rollout-routing-replay --no-save-optim --sglang-disable-cuda-graph "
-        engines += "--rematerialize-param-from-master-weight --check-rematerialize-param-from-master-weight "
+        engines += "--streaming-model-checkpoint-save "
         performance += "--expert-model-parallel-size 8 --expert-tensor-parallel-size 1 "
-        # Keep a small fraction on GPU to bound host RAM for the full 122B test.
-        optimizer += "--optimizer-offload-fraction 0.8 "
+        # CPU Adam retains a second full gradient copy. Stage optimizer state in
+        # small GPU windows instead, retaining FP32 moments and TE's exact masters.
+        optimizer += (
+            "--use-precision-aware-optimizer --chunked-optimizer-state-offload "
+            "--optimizer-state-offload-fraction 1.0 --optimizer-state-offload-chunk-size-mb 256 "
+            "--main-params-dtype fp32 --exp-avg-dtype fp32 --exp-avg-sq-dtype fp32 "
+        )
     else:
+        optimizer += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
         engines += f"--rollout-num-gpus {args.rollout_gpus} --namespaced-radix-cache "
     evaluation = (
         ""

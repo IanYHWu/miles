@@ -924,6 +924,12 @@ def save(
     """
     args = get_args()
     hashes = None
+    if getattr(args, "streaming_model_checkpoint_save", False):
+        # Optional save strategy; leave the default checkpoint path unchanged.
+        from miles.backends.megatron_utils.streaming_checkpoint import StreamingTorchDistSaveStrategy
+
+        checkpointing_context = dict(checkpointing_context or {})
+        checkpointing_context["save_strategy"] = StreamingTorchDistSaveStrategy()
     if args.ci_test and args.ci_save_model_hash:
         hashes = compute_model_hashes_by_layer(model)
     if should_disable_forward_pre_hook(args):
