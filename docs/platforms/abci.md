@@ -76,7 +76,7 @@ and rubric, as in the baseline this adapter was built for.
 
 Transient HTTP failures retry with capped backoff and honor cancellation. Permanent
 4xx failures stop the run instead of silently assigning zero rewards. Parse failures
-use the application parser's error score. Missing score types, rubric/reference data,
+use the application parser's error score. Unknown score types, missing rubric/reference data,
 or credentials fail explicitly.
 
 ## PBS smoke and production launch
@@ -96,7 +96,9 @@ all eight GPUs with colocated training/rollout, TP2/EP8 training, TP8 inference,
 rollout routing replay, and one short update. It saves model weights only; the
 9B smoke covers optimizer checkpoint restart. Colocation requires `retract`
 pauses and publishing weights after every update, unlike the disaggregated
-baseline. The 122B production topology is deliberately not selected by this recipe.
+baseline. To bound host memory, it reconstructs training weights from the optimizer's
+master weights between phases, with the built-in bitwise reconstruction check enabled.
+The 122B production topology is deliberately not selected by this recipe.
 
 For the 100-update 9B baseline, `examples/platforms/abci/train.pbs` allocates two nodes and invokes `tools/abci/launch.py` with
 `--mode train` explicitly; the default mode is read-only preflight. The wrapper uses

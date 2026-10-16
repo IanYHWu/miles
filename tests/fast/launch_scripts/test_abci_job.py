@@ -54,5 +54,8 @@ def test_resume_checks_new_gradients_without_comparing_to_pretrained_weights(mon
     launch._execute_recipe(args)
     assert "--check-weight-update-equal" in calls[0][-1]
     assert "--check-weight-update-equal" not in calls[1][-1]
+    assert "--ci-test" in calls[0][-1] and "--ci-test" in calls[1][-1]
+    assert "--num-rollout 3 --debug-exit-after-rollout 2" in calls[0][-1]
+    assert "--debug-exit-after-rollout" not in calls[1][-1]
     assert Path(calls[1][calls[1].index("--load") + 1]) == run_dir / "checkpoints"
     assert "--num-rollout 3" in calls[1][-1]

@@ -121,16 +121,22 @@ def _execute_recipe(args):
         raise RuntimeError(f"Smoke output already exists: {run_dir}")
     extra = (
         "--custom-rm-path tests.manual.judged_baseline_fixture.reward "
+        # Gradient artifacts require CI mode. Its zero-KL assertion assumes
+        # recomputed actor logprobs, unlike this rollout-logprob CISPO recipe.
+        # Control the HF equality check explicitly so resume can turn it off.
+        "--ci-test --ci-disable-kl-checker --ci-disable-weight-update-checker "
         "--check-weight-update-equal --check-weight-update-skip-list visual mtp "
         f"--ci-save-grad-norm {shlex.quote(str(run_dir / 'grad-{rollout_id}.pt'))} "
         "--log-inference-engine-weight-checksums"
     )
-    _run(argv + ["--smoke", "--extra-args", extra])
+    restart = args.model_name == "Qwen3.5-9B"
+    # Keep the scheduler horizon identical across interruption and restart.
+    initial_extra = extra + (" --num-rollout 3 --debug-exit-after-rollout 2" if restart else "")
+    _run(argv + ["--smoke", "--extra-args", initial_extra])
     tracker = checkpoint / "latest_checkpointed_iteration.txt"
     if not tracker.exists():
         raise RuntimeError("Smoke did not save a resumable checkpoint")
     iteration = int(tracker.read_text().strip())
-    restart = args.model_name == "Qwen3.5-9B"
     if restart:
         # Relaunch the complete stack and require a fresh update after restoring.
         # The initial equality check compares against the original HF weights,

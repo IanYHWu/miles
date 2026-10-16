@@ -120,6 +120,7 @@ def _train_args(args):
     )
     if colocate:
         engines += "--colocate --use-rollout-routing-replay --no-save-optim --sglang-disable-cuda-graph "
+        engines += "--rematerialize-param-from-master-weight --check-rematerialize-param-from-master-weight "
         performance += "--expert-model-parallel-size 8 --expert-tensor-parallel-size 1 "
         # Keep a small fraction on GPU to bound host RAM for the full 122B test.
         optimizer += "--optimizer-offload-fraction 0.8 "
