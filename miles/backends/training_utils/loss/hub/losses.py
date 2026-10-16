@@ -14,6 +14,7 @@ from miles.backends.training_utils.loss.hub.corrections import vanilla_tis_funct
 from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy, get_values
 from miles.backends.training_utils.loss.hub.math_utils import (
     compute_approx_kl,
+    compute_cispo_loss,
     compute_ess_ratio_contribution,
     compute_gspo_kl,
     compute_opsm_mask,
@@ -67,7 +68,7 @@ def policy_loss_function(
     logits: torch.Tensor,
     sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compute policy loss (PPO/GSPO) and metrics.
+    """Compute policy loss (PPO/GSPO/CISPO) and metrics.
 
     Computes current log-probabilities and entropy from model logits, then
     calculates PPO-style clipped policy gradient loss. For GSPO, gathers
@@ -208,9 +209,17 @@ def policy_loss_function(
         advantages.new_zeros(()),
     )
 
-    pg_loss, pg_clipfrac = compute_policy_loss(
-        ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
-    )
+    if getattr(args, "policy_loss_type", "ppo") == "cispo":
+        # Masked positions can contain nonfinite padding scores; do not let them
+        # contaminate a token-sum reduction with 0 * inf.
+        cispo_log_probs = torch.where(active_tokens, log_probs, log_probs.new_zeros(()))
+        pg_loss, pg_clipfrac = compute_cispo_loss(
+            cispo_log_probs, ppo_kl, advantages, args.eps_clip, args.eps_clip_high
+        )
+    else:
+        pg_loss, pg_clipfrac = compute_policy_loss(
+            ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
+        )
 
     if getattr(args, "dump_details", None) is not None:
         from miles.backends.training_utils.metrics.debug_dump import maybe_dump_policy_loss_debug
