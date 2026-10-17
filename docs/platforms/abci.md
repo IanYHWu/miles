@@ -107,10 +107,13 @@ resolve: the default two-step grace period can misclassify legitimate long or
 buffered trajectories as lost. This allowance does not relax the policy's
 staleness filter or the check against duplicate training consumption.
 
-Weight versions advance on every optimizer update. The baseline's staleness
-limit is two, allowing samples to survive one publication at its two-update
-cadence. This is a version-gap filter, not a direct translation of verl's
-rollout-production budget. Monitor stale-group drops when tuning long responses.
+Weight versions advance on every optimizer update. The initial staleness limit
+is six, allowing three publication gaps at the two-update cadence. In the async
+smoke, a limit of two discarded every mixed-version long trajectory before
+training; generation itself spanned several versions, followed by queue delay.
+This is a version-gap filter, not a direct translation of verl's production
+budget. Monitor drops by response length and tune against the full-length run;
+the short smoke does not establish the best stability/throughput tradeoff.
 
 Set `MILES_MODEL_NAME=Qwen3.5-122B-A10B` for the full-size MoE smoke. This uses
 all eight GPUs with colocated training/rollout, TP4/EP8 training, TP8 inference,

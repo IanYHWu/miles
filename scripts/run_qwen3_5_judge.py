@@ -46,8 +46,9 @@ class ScriptArgs(U.ExecuteTrainConfig):
     clip_low: float = 10.0
     clip_high: float = 4.0
     update_interval: int = 2
-    # Versions advance per optimizer step, not per weight publication.
-    max_weight_staleness: int = 2
+    # Versions advance per optimizer step, not per weight publication. Allow
+    # long requests to span publications and then wait in the completed buffer.
+    max_weight_staleness: int = 6
     concurrency: int = 1024
     eval_interval: int = 30
     save_interval: int = 20
