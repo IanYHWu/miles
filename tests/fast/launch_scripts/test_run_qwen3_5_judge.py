@@ -21,7 +21,7 @@ def test_judged_recipe_uses_async_cispo_without_logging_credentials(
     assert flags[flags.index("--num-rollout") + 1] == expected_updates
     assert flags[flags.index("--policy-loss-type") + 1] == "cispo"
     assert "--fully-async" in flags and "--calculate-per-token-loss" in flags
-    assert args.max_weight_staleness >= args.update_interval
+    assert "--max-weight-staleness" not in flags
     launcher.execute(args)
     commands = "\n".join(recording.commands)
     assert "train_async.py" in commands
@@ -52,3 +52,14 @@ def test_async_smoke_keeps_rollout_and_training_on_separate_gpus():
     assert args.concurrency > args.rollout_batch_size * args.samples_per_prompt
     with pytest.raises(ValueError, match="separate 9B"):
         launcher.ScriptArgs(async_smoke=True, model_name="Qwen3.5-122B-A10B")
+
+
+def test_production_retains_only_latest_checkpoint_and_accepts_three_rollout_nodes():
+    launcher = import_launch_script(REPO_ROOT / "scripts/run_qwen3_5_judge.py")
+    args = launcher.ScriptArgs(num_rollout=120, rollout_gpus=24)
+    flags = shlex.split(launcher._train_args(args))
+    retain = int(flags[flags.index("--save-retain-interval") + 1])
+    assert retain > args.num_rollout and retain % args.save_interval == 0
+    assert flags[flags.index("--rollout-num-gpus") + 1] == "24"
+    assert "--async-save" not in flags and "--no-save-optim" not in flags
+    assert "--max-weight-staleness" not in flags

@@ -107,13 +107,14 @@ resolve: the default two-step grace period can misclassify legitimate long or
 buffered trajectories as lost. This allowance does not relax the policy's
 staleness filter or the check against duplicate training consumption.
 
-Weight versions advance on every optimizer update. The initial staleness limit
-is six, allowing three publication gaps at the two-update cadence. In the async
-smoke, a limit of two discarded every mixed-version long trajectory before
-training; generation itself spanned several versions, followed by queue delay.
-This is a version-gap filter, not a direct translation of verl's production
-budget. Monitor drops by response length and tune against the full-length run;
-the short smoke does not establish the best stability/throughput tradeoff.
+Production leaves the token-age cutoff unset and bounds generation through concurrency
+and the completed buffer. The async stress smoke explicitly uses a limit of six
+optimizer versions to test stale-group rejection; it is not a production recommendation.
+At the two-update publication cadence, six versions cover three publication gaps.
+
+Production keeps only the latest full model/optimizer checkpoint. Megatron finalizes
+the new save before deleting the previous one; its permanent-retention milestone is
+set beyond the run horizon. A replacement can temporarily coexist with the previous save.
 
 Set `MILES_MODEL_NAME=Qwen3.5-122B-A10B` for the full-size MoE smoke. This uses
 all eight GPUs with colocated training/rollout, TP4/EP8 training, TP8 inference,
@@ -139,8 +140,9 @@ the 9B optimizer checkpoint path is unchanged.
 The 122B production topology is deliberately not selected by this recipe.
 
 For the 100-update 9B baseline, `examples/platforms/abci/train.pbs` allocates two nodes and invokes `tools/abci/launch.py` with
-`--mode train` explicitly; the default mode is read-only preflight. The wrapper uses
-PBS to start the second node, a job-local Ray cluster, and separate PID namespaces.
+`--mode train` explicitly; the default mode is read-only preflight. Set `MILES_ROLLOUT_NODES=3` and `MILES_NUM_ROLLOUT=120`, and override PBS
+with `-l select=4`, for one trainer node plus three rollout nodes. The wrapper uses
+PBS to start each additional node, a job-local Ray cluster, and separate PID namespaces.
 It does not run user-wide process cleanup or alter another allocation. Credentials
 are loaded within each container, outside command-line arguments and Ray runtime
 environment logs. `--credentials-file` optionally reads the local colon-delimited

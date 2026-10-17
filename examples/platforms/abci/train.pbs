@@ -17,4 +17,5 @@ exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode train \
   --model-name "${MILES_MODEL_NAME:-Qwen3.5-9B}" \
   --judge-config "${MILES_JUDGE_CONFIG}" --private-pythonpath "${MILES_PRIVATE_PYTHONPATH:-}" \
   --credentials-file "${MILES_CREDENTIALS_FILE:-}" --load "${MILES_LOAD:-}" \
+  --rollout-nodes "${MILES_ROLLOUT_NODES:-1}" --num-rollout "${MILES_NUM_ROLLOUT:-100}" \
   --wandb-project "${MILES_WANDB_PROJECT:-}" --wandb-entity "${MILES_WANDB_ENTITY:-}"

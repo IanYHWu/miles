@@ -25,6 +25,8 @@ def _parser():
     p.add_argument("--model-name", choices=["Qwen3.5-9B", "Qwen3.5-122B-A10B"], default="Qwen3.5-9B")
     p.add_argument("--credentials-file", default="")
     p.add_argument("--load", default="")
+    p.add_argument("--rollout-nodes", type=int, default=1)
+    p.add_argument("--num-rollout", type=int, default=100)
     p.add_argument("--wandb-project", default="")
     p.add_argument("--wandb-entity", default="")
     p.add_argument("--role", choices=["host", "head", "worker"], default="host")
@@ -110,7 +112,18 @@ def _execute_recipe(args):
         run_id,
     ]
     if args.mode not in ("smoke", "async-smoke"):
-        argv += ["--load", args.load, "--wandb-project", args.wandb_project, "--wandb-entity", args.wandb_entity]
+        argv += [
+            "--load",
+            args.load,
+            "--wandb-project",
+            args.wandb_project,
+            "--wandb-entity",
+            args.wandb_entity,
+            "--rollout-gpus",
+            str(8 * args.rollout_nodes),
+            "--num-rollout",
+            str(args.num_rollout),
+        ]
         _run(argv)
         return
     import torch
@@ -193,6 +206,7 @@ def _container_role(args):
             "TORCHINDUCTOR_CACHE_DIR": args.scratch + "/inductor",
             "CUDA_CACHE_PATH": args.scratch + "/cuda",
             "XDG_CACHE_HOME": args.scratch + "/cache",
+            "SGLANG_CACHE_DIR": args.scratch + "/sglang",
             "FLASHINFER_WORKSPACE_BASE": args.scratch + "/flashinfer",
             "TORCH_EXTENSIONS_DIR": args.scratch + "/torch-extensions",
             "MILES_LOG_DIR": args.scratch + "/logs",
@@ -254,8 +268,11 @@ def _host(args):
     nodefile = os.environ.get("PBS_NODEFILE")
     if not nodefile or not os.environ.get("PBS_JOBID"):
         raise SystemExit("Run inside a PBS allocation; never launch GPU workloads on a login node")
-    nodes = list(dict.fromkeys(Path(nodefile).read_text().split()))
-    expected = 2 if args.mode == "train" else 1
+    slots = Path(nodefile).read_text().split()
+    nodes = list(dict.fromkeys(slots))
+    if args.rollout_nodes < 1 or args.num_rollout < 1:
+        raise SystemExit("rollout-nodes and num-rollout must be positive")
+    expected = 1 + args.rollout_nodes if args.mode == "train" else 1
     if len(nodes) != expected:
         raise SystemExit(f"{args.mode} requires {expected} node(s), found {len(nodes)}")
     for path in (args.image, args.repo, args.model_dir, args.data_dir, args.judge_config):
@@ -288,12 +305,13 @@ def _host(args):
     common = [x for x in sys.argv[1:]]
     workers = []
     try:
-        if len(nodes) > 1:
+        for node in nodes[1:]:
             # PBS starts workers in this job's allocation. Ray workers retry until
             # the head comes up; use an explicit wait wrapper instead of SSH agents.
             workers.append(
                 subprocess.Popen(
-                    ["pbsdsh", "-n", "1", "--"] + command + common + ["--role", "worker", "--head-ip", head_ip]
+                    ["pbsdsh", "-n", str(slots.index(node)), "--"]
+                    + command + common + ["--role", "worker", "--head-ip", head_ip]
                 )
             )
         _run_head(command + common + ["--role", "head", "--head-ip", head_ip], workers)

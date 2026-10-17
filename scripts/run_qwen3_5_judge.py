@@ -46,9 +46,9 @@ class ScriptArgs(U.ExecuteTrainConfig):
     clip_low: float = 10.0
     clip_high: float = 4.0
     update_interval: int = 2
-    # Versions advance per optimizer step, not per weight publication. Allow
-    # long requests to span publications and then wait in the completed buffer.
-    max_weight_staleness: int = 6
+    # Bound production through concurrency and buffering; do not drop long responses by age.
+    max_weight_staleness: int | None = None
+    keep_latest_checkpoint: bool = True
     concurrency: int = 1024
     eval_interval: int = 30
     save_interval: int = 20
@@ -77,6 +77,8 @@ class ScriptArgs(U.ExecuteTrainConfig):
                 self.samples_per_prompt = 4
                 self.update_interval, self.num_rollout = 1, 1
         if self.async_smoke:
+            # The stress test explicitly exercises stale-group rejection.
+            self.max_weight_staleness = 6 if self.max_weight_staleness is None else self.max_weight_staleness
             self.num_rollout = 12
             self.response_length, self.context_length, self.concurrency = 4096, 8192, 16
         if self.actor_gpus % self.train_tp or self.rollout_gpus % self.rollout_tp:
@@ -92,6 +94,11 @@ def _train_args(args):
         f"--save {q(f'{args.output_dir}/{args.run_id}/checkpoints')} "
         f"--save-interval {args.num_rollout if args.async_smoke else 2 if args.smoke else args.save_interval} "
     )
+    if args.keep_latest_checkpoint and not args.smoke:
+        # Megatron deletes the previous completed save after finalizing the new one.
+        # Put the permanent-retention milestone beyond this run's last iteration.
+        retain_interval = args.save_interval * (args.num_rollout // args.save_interval + 1)
+        checkpoint += f"--save-retain-interval {retain_interval} "
     rollout = (
         f"--prompt-data {q(args.data_dir + '/train.parquet')} --input-key prompt "
         "--label-key reward_model --metadata-key extra_info --apply-chat-template --rollout-shuffle "
@@ -102,9 +109,11 @@ def _train_args(args):
         f"--rollout-max-response-len {args.response_length} --rollout-max-prompt-len {args.prompt_length} "
         "--rollout-temperature 1 --rollout-top-p 1 --rollout-top-k -1 --balance-data "
         f"--fully-async --pause-generation-mode {'retract' if colocate else 'in_place'} "
-        f"--update-weights-interval {args.update_interval} --max-weight-staleness {args.max_weight_staleness} "
+        f"--update-weights-interval {args.update_interval} "
         f"--async-max-concurrent-samples {args.concurrency} "
     )
+    if args.max_weight_staleness is not None:
+        rollout += f"--max-weight-staleness {args.max_weight_staleness} "
     algorithm = (
         "--advantage-estimator grpo --policy-loss-type cispo --use-rollout-logprobs "
         "--skip-actor-forward-only --calculate-per-token-loss --observe-training-entropy "
