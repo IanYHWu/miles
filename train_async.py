@@ -54,9 +54,12 @@ async def train(args, *, disposer: Disposer):
     eval_dispatcher = EvalDispatcher(args, actor_model, rollout_executor)
     disposer.add(eval_dispatcher.drain)
 
-    if args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train:
+    if args.eval_interval is not None and not args.skip_eval_before_train:
         await inference_controller.prepare_eval()
-        await eval_dispatcher.dispatch(0, hf_dir=args.hf_checkpoint)
+        if args.start_rollout_id == 0:
+            await eval_dispatcher.dispatch(0, hf_dir=args.hf_checkpoint)
+        else:
+            await eval_dispatcher.dispatch(args.start_rollout_id - 1)
 
     async def save_training_model(model, rollout_id, force_sync):
         if args.use_critic and args.offload_train:
@@ -119,10 +122,11 @@ async def train(args, *, disposer: Disposer):
             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
         ):
             force_sync = external_save or rollout_id == args.num_rollout - 1
+            # Publish the model checkpoint only after its rollout state is durable.
+            await rollout_executor.save(rollout_id)
             await save_training_model(actor_model, rollout_id, force_sync)
             if args.use_critic:
                 await save_training_model(critic_model, rollout_id, force_sync)
-            await rollout_executor.save(rollout_id)
             if external_save:
                 os.remove(args.save_trigger_sentinel)
 

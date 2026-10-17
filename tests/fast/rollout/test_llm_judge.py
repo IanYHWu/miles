@@ -25,8 +25,9 @@ def read_answer(text):
 
 @pytest.fixture
 def config():
-    with function_registry.temporary("test_judge.factory", FakeJudge), function_registry.temporary(
-        "test_judge.read", read_answer
+    with (
+        function_registry.temporary("test_judge.factory", FakeJudge),
+        function_registry.temporary("test_judge.read", read_answer),
     ):
         yield {
             "model": "test",
@@ -57,7 +58,7 @@ def test_prepare_routes_and_never_sends_thinking(config):
         runtime.prepare(sample(kind="typo"))
 
 
-@pytest.mark.parametrize("status", [429, 500, 401])
+@pytest.mark.parametrize("status", [400, 429, 500, 401])
 def test_http_retry_and_permanent_failure(config, monkeypatch, status):
     monkeypatch.setenv("LLM_JUDGE_API_KEY", "test-only")
 
@@ -100,3 +101,55 @@ def test_cancelled_judge_is_not_retried(config, monkeypatch):
     monkeypatch.setattr(JudgeRuntime, "chat", cancel)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(JudgeRuntime(config).score(sample()))
+
+
+def test_bad_requests_are_bounded_and_diagnostics_do_not_echo_prompts(config, monkeypatch, caplog, tmp_path):
+    monkeypatch.setenv("LLM_JUDGE_API_KEY", "test-only")
+
+    async def run():
+        calls = 0
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            return web.json_response(
+                {
+                    "error": {
+                        "code": "invalid_prompt",
+                        "type": "invalid_request_error",
+                        "message": "private-prompt-must-not-be-logged",
+                    }
+                },
+                status=400,
+                headers={"x-request-id": "req_123"},
+            )
+
+        app = web.Application()
+        app.router.add_post("/chat", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            runtime = JudgeRuntime(
+                {
+                    **config,
+                    "block_on_failure": True,
+                    "error_log_dir": str(tmp_path),
+                    "endpoint_url": f"http://127.0.0.1:{port}/chat",
+                }
+            )
+            with pytest.raises(RuntimeError, match="HTTP 400 after 3 attempts") as error:
+                await runtime.score(sample())
+            assert calls == 3
+            files = list(tmp_path.glob("judge-error-*.json"))
+            assert len(files) == 3
+            assert all(path.stat().st_mode & 0o777 == 0o600 for path in files)
+            assert "private-prompt-must-not-be-logged" in files[0].read_text()
+            assert "invalid_prompt" in str(error.value) and "req_123" in str(error.value)
+            assert "private-prompt-must-not-be-logged" not in str(error.value) + caplog.text
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())

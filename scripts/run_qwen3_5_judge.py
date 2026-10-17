@@ -51,10 +51,12 @@ class ScriptArgs(U.ExecuteTrainConfig):
     keep_latest_checkpoint: bool = True
     concurrency: int = 1024
     eval_interval: int = 30
-    save_interval: int = 20
+    save_interval: int = 5
+    skip_eval_before_train: bool = True
     smoke: bool = False
     async_smoke: bool = False
     load: str = ""
+    checkpoint_dir: str = ""
     extra_args: str = ""
     wandb_project: str = ""
     wandb_entity: str = ""
@@ -89,11 +91,8 @@ def _train_args(args):
     q = shlex.quote
     model = f"{args.model_dir}/{args.model_name}"
     colocate = args.model_name == "Qwen3.5-122B-A10B"
-    checkpoint = (
-        f"--hf-checkpoint {q(model)} --ref-load {q(model)} --load {q(args.load or model)} "
-        f"--save {q(f'{args.output_dir}/{args.run_id}/checkpoints')} "
-        f"--save-interval {args.num_rollout if args.async_smoke else 2 if args.smoke else args.save_interval} "
-    )
+    checkpoint_dir = args.checkpoint_dir or f"{args.output_dir}/{args.run_id}/checkpoints"
+    checkpoint = f"--hf-checkpoint {q(model)} --ref-load {q(model)} --load {q(args.load or model)} --save {q(checkpoint_dir)} --save-interval {args.num_rollout if args.async_smoke else 2 if args.smoke else args.save_interval} "
     if args.keep_latest_checkpoint and not args.smoke:
         # Megatron deletes the previous completed save after finalizing the new one.
         # Put the permanent-retention milestone beyond this run's last iteration.
@@ -114,15 +113,8 @@ def _train_args(args):
     )
     if args.max_weight_staleness is not None:
         rollout += f"--max-weight-staleness {args.max_weight_staleness} "
-    algorithm = (
-        "--advantage-estimator grpo --policy-loss-type cispo --use-rollout-logprobs "
-        "--skip-actor-forward-only --calculate-per-token-loss --observe-training-entropy "
-        f"--eps-clip {args.clip_low} --eps-clip-high {args.clip_high} --entropy-coef 0 --kl-coef 0 "
-    )
-    optimizer = (
-        f"--optimizer adam --lr {args.lr} --lr-decay-style constant --weight-decay 0.01 "
-        "--adam-beta1 0.9 --adam-beta2 0.999 --clip-grad 1 "
-    )
+    algorithm = f"--advantage-estimator grpo --policy-loss-type cispo --use-rollout-logprobs --skip-actor-forward-only --calculate-per-token-loss --observe-training-entropy --eps-clip {args.clip_low} --eps-clip-high {args.clip_high} --entropy-coef 0 --kl-coef 0 "
+    optimizer = f"--optimizer adam --lr {args.lr} --lr-decay-style constant --weight-decay 0.01 --adam-beta1 0.9 --adam-beta2 0.999 --clip-grad 1 "
     performance = (
         f"--seed 42 --tensor-model-parallel-size {args.train_tp} --sequence-parallel "
         "--pipeline-model-parallel-size 1 --context-parallel-size 1 --micro-batch-size 1 "
@@ -142,17 +134,12 @@ def _train_args(args):
         # Back only the GPU-resident sleep-window state with disk. CPU-canonical
         # optimizer moments stay in RAM; streaming the entire optimizer is unnecessary.
         engines += (
-            "--offload-train-target disk "
-            f"--offload-train-disk-dir {q(f'{args.output_dir}/{args.run_id}/offload')} "
+            f"--offload-train-target disk --offload-train-disk-dir {q(f'{args.output_dir}/{args.run_id}/offload')} "
         )
         performance += "--expert-model-parallel-size 8 --expert-tensor-parallel-size 1 "
         # CPU Adam retains a second full gradient copy. Stage optimizer state in
         # small GPU windows instead, retaining FP32 moments and TE's exact masters.
-        optimizer += (
-            "--use-precision-aware-optimizer --chunked-optimizer-state-offload "
-            "--optimizer-state-offload-fraction 1.0 --optimizer-state-offload-chunk-size-mb 256 "
-            "--main-params-dtype fp32 --exp-avg-dtype fp32 --exp-avg-sq-dtype fp32 "
-        )
+        optimizer += "--use-precision-aware-optimizer --chunked-optimizer-state-offload --optimizer-state-offload-fraction 1.0 --optimizer-state-offload-chunk-size-mb 256 --main-params-dtype fp32 --exp-avg-dtype fp32 --exp-avg-sq-dtype fp32 "
     else:
         optimizer += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
         engines += f"--rollout-num-gpus {args.rollout_gpus} --namespaced-radix-cache "
@@ -160,11 +147,11 @@ def _train_args(args):
         ""
         if args.smoke
         else (
-            f"--eval-prompt-data validation {q(args.data_dir + '/val.parquet')} --eval-interval {args.eval_interval} "
-            f"--n-samples-per-eval-prompt 3 --eval-max-response-len {args.response_length} "
-            "--eval-temperature 1 --eval-top-p 1 --eval-top-k -1 --skip-eval-before-train "
+            f"--eval-prompt-data validation {q(args.data_dir + '/val.parquet')} --eval-interval {args.eval_interval} --n-samples-per-eval-prompt 3 --eval-max-response-len {args.response_length} --eval-temperature 1 --eval-top-p 1 --eval-top-k -1 "
         )
     )
+    if evaluation and args.skip_eval_before_train:
+        evaluation += "--skip-eval-before-train "
     return checkpoint + rollout + algorithm + optimizer + performance + engines + evaluation + args.extra_args
 
 

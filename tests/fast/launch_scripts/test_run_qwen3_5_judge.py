@@ -63,3 +63,19 @@ def test_production_retains_only_latest_checkpoint_and_accepts_three_rollout_nod
     assert flags[flags.index("--rollout-num-gpus") + 1] == "24"
     assert "--async-save" not in flags and "--no-save-optim" not in flags
     assert "--max-weight-staleness" not in flags
+
+
+def test_resume_can_save_into_original_checkpoint_root():
+    launcher = import_launch_script(REPO_ROOT / "scripts/run_qwen3_5_judge.py")
+    args = launcher.ScriptArgs(
+        num_rollout=120,
+        load="/existing/checkpoints",
+        checkpoint_dir="/existing/checkpoints",
+        skip_eval_before_train=False,
+    )
+    flags = shlex.split(launcher._train_args(args))
+    assert flags[flags.index("--load") + 1] == flags[flags.index("--save") + 1] == "/existing/checkpoints"
+    assert flags[flags.index("--num-rollout") + 1] == "120"
+    assert "--skip-eval-before-train" not in flags
+    assert flags[flags.index("--save-interval") + 1] == "5"
+    assert flags[flags.index("--save-retain-interval") + 1] == "125"

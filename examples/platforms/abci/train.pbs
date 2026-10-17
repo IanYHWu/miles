@@ -2,7 +2,7 @@
 #PBS -P gai51740
 #PBS -q R9920261300
 #PBS -l select=2
-#PBS -l walltime=12:00:00
+#PBS -l walltime=64:00:00
 #PBS -v RTYPE=rt_HF
 #PBS -j oe
 set -euo pipefail
@@ -10,6 +10,10 @@ set -euo pipefail
 : "${MILES_MODEL_DIR:?}" "${MILES_DATA_DIR:?}" "${MILES_JUDGE_CONFIG:?}"
 mkdir -p "${MILES_SCRATCH}/logs"
 exec > "${MILES_SCRATCH}/logs/${PBS_JOBID}.log" 2>&1
+extra_args=()
+if [[ "${MILES_EVAL_BEFORE_TRAIN:-0}" == "1" ]]; then
+  extra_args+=(--eval-before-train)
+fi
 exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode train \
   --repo "${MILES_REPO}" --image "${MILES_IMAGE}" --scratch "${MILES_SCRATCH}" \
   --container-root "${MILES_CONTAINER_ROOT:-}" \
@@ -17,5 +21,6 @@ exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode train \
   --model-name "${MILES_MODEL_NAME:-Qwen3.5-9B}" \
   --judge-config "${MILES_JUDGE_CONFIG}" --private-pythonpath "${MILES_PRIVATE_PYTHONPATH:-}" \
   --credentials-file "${MILES_CREDENTIALS_FILE:-}" --load "${MILES_LOAD:-}" \
+  --checkpoint-dir "${MILES_CHECKPOINT_DIR:-}" --save-interval "${MILES_SAVE_INTERVAL:-5}" \
   --rollout-nodes "${MILES_ROLLOUT_NODES:-1}" --num-rollout "${MILES_NUM_ROLLOUT:-100}" \
-  --wandb-project "${MILES_WANDB_PROJECT:-}" --wandb-entity "${MILES_WANDB_ENTITY:-}"
+  --wandb-project "${MILES_WANDB_PROJECT:-}" --wandb-entity "${MILES_WANDB_ENTITY:-}" "${extra_args[@]}"

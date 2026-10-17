@@ -25,6 +25,9 @@ def _parser():
     p.add_argument("--model-name", choices=["Qwen3.5-9B", "Qwen3.5-122B-A10B"], default="Qwen3.5-9B")
     p.add_argument("--credentials-file", default="")
     p.add_argument("--load", default="")
+    p.add_argument("--checkpoint-dir", default="")
+    p.add_argument("--save-interval", type=int, default=5)
+    p.add_argument("--eval-before-train", action="store_true")
     p.add_argument("--rollout-nodes", type=int, default=1)
     p.add_argument("--num-rollout", type=int, default=100)
     p.add_argument("--wandb-project", default="")
@@ -115,6 +118,10 @@ def _execute_recipe(args):
         argv += [
             "--load",
             args.load,
+            "--checkpoint-dir",
+            args.checkpoint_dir,
+            "--save-interval",
+            str(args.save_interval),
             "--wandb-project",
             args.wandb_project,
             "--wandb-entity",
@@ -124,6 +131,8 @@ def _execute_recipe(args):
             "--num-rollout",
             str(args.num_rollout),
         ]
+        if args.eval_before_train:
+            argv.append("--no-skip-eval-before-train")
         _run(argv)
         return
     import torch
@@ -146,10 +155,7 @@ def _execute_recipe(args):
         extra += (
             # The CI default (two steps) declares legitimate long/in-flight or
             # buffered groups lost before the async consumer can resolve them.
-            " --sample-ownership-grace-steps 8 "
-            "--custom-generate-function-path tests.manual.async_baseline_fixture.generate "
-            "--custom-rollout-log-function-path tests.manual.async_baseline_fixture.log_rollout_data "
-            "--custom-megatron-before-train-step-hook-path tests.manual.async_baseline_fixture.before_train"
+            " --sample-ownership-grace-steps 8 --custom-generate-function-path tests.manual.async_baseline_fixture.generate --custom-rollout-log-function-path tests.manual.async_baseline_fixture.log_rollout_data --custom-megatron-before-train-step-hook-path tests.manual.async_baseline_fixture.before_train"
         )
         _run(argv + ["--async-smoke", "--extra-args", extra])
         # A fresh interpreter picks up the repository PYTHONPATH set by the
@@ -311,7 +317,9 @@ def _host(args):
             workers.append(
                 subprocess.Popen(
                     ["pbsdsh", "-n", str(slots.index(node)), "--"]
-                    + command + common + ["--role", "worker", "--head-ip", head_ip]
+                    + command
+                    + common
+                    + ["--role", "worker", "--head-ip", head_ip]
                 )
             )
         _run_head(command + common + ["--role", "head", "--head-ip", head_ip], workers)

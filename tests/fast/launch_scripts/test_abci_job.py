@@ -91,19 +91,46 @@ def test_async_smoke_validates_in_a_fresh_interpreter(monkeypatch, tmp_path):
 
 
 def test_train_forwards_rollout_topology_and_update_count(monkeypatch, tmp_path):
-    args = launch._parser().parse_args([
-        "--mode", "train", "--image", "unused", "--repo", "unused",
-        "--scratch", str(tmp_path), "--model-dir", "unused", "--data-dir", "unused",
-        "--judge-config", "unused", "--rollout-nodes", "3", "--num-rollout", "120",
-    ])
+    args = launch._parser().parse_args(
+        [
+            "--mode",
+            "train",
+            "--image",
+            "unused",
+            "--repo",
+            "unused",
+            "--scratch",
+            str(tmp_path),
+            "--model-dir",
+            "unused",
+            "--data-dir",
+            "unused",
+            "--judge-config",
+            "unused",
+            "--rollout-nodes",
+            "3",
+            "--num-rollout",
+            "120",
+            "--load",
+            "/existing/checkpoints",
+            "--checkpoint-dir",
+            "/existing/checkpoints",
+            "--eval-before-train",
+            "--save-interval",
+            "5",
+        ]
+    )
     monkeypatch.setenv("PBS_JOBID", "789.pbs")
     calls = []
     monkeypatch.setattr(launch, "_run", calls.append)
     launch._execute_recipe(args)
-    argv, = calls
+    (argv,) = calls
     assert argv[argv.index("--rollout-gpus") + 1] == "24"
     assert argv[argv.index("--num-rollout") + 1] == "120"
+    assert argv[argv.index("--load") + 1] == argv[argv.index("--checkpoint-dir") + 1] == "/existing/checkpoints"
     assert "--smoke" not in argv and "--extra-args" not in argv
+    assert "--no-skip-eval-before-train" in argv
+    assert argv[argv.index("--save-interval") + 1] == "5"
 
 
 def test_four_node_host_starts_all_workers_using_pbs_slot_indices(monkeypatch, tmp_path):
@@ -111,17 +138,36 @@ def test_four_node_host_starts_all_workers_using_pbs_slot_indices(monkeypatch, t
     nodefile.write_text("head\nhead\na\na\nb\nb\nc\nc\n")
     monkeypatch.setenv("PBS_JOBID", "789.pbs")
     monkeypatch.setenv("PBS_NODEFILE", str(nodefile))
-    args = launch._parser().parse_args([
-        "--mode", "train", "--image", str(tmp_path), "--repo", str(tmp_path),
-        "--scratch", str(tmp_path), "--model-dir", str(tmp_path), "--data-dir", str(tmp_path),
-        "--judge-config", str(tmp_path), "--rollout-nodes", "3", "--num-rollout", "120",
-    ])
+    args = launch._parser().parse_args(
+        [
+            "--mode",
+            "train",
+            "--image",
+            str(tmp_path),
+            "--repo",
+            str(tmp_path),
+            "--scratch",
+            str(tmp_path),
+            "--model-dir",
+            str(tmp_path),
+            "--data-dir",
+            str(tmp_path),
+            "--judge-config",
+            str(tmp_path),
+            "--rollout-nodes",
+            "3",
+            "--num-rollout",
+            "120",
+        ]
+    )
     commands, workers = [], []
+
     def popen(command):
         commands.append(command)
         worker = Mock()
         workers.append(worker)
         return worker
+
     monkeypatch.setattr(launch.socket, "gethostbyname", lambda _: "10.0.0.1")
     monkeypatch.setattr(launch.subprocess, "Popen", popen)
     head = Mock()

@@ -11,6 +11,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 from weakref import WeakKeyDictionary
@@ -82,10 +84,9 @@ class JudgeRuntime:
             payload["reasoning_effort"] = cfg["reasoning_effort"]
         delay = cfg.get("retry_initial_s", 5.0)
         attempts = 0
+        bad_requests = 0
         async with self.semaphore:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=cfg.get("timeout_s", 900))
-            ) as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=cfg.get("timeout_s", 900))) as session:
                 while True:
                     attempts += 1
                     try:
@@ -93,11 +94,17 @@ class JudgeRuntime:
                             cfg["endpoint_url"], json=payload, headers={"Authorization": f"Bearer {key}"}
                         ) as response:
                             if 400 <= response.status < 500 and response.status not in (408, 429):
-                                # A permanent configuration failure must stop the job;
-                                # unlike the reference recipe, never train on auth-error zeros.
-                                raise PermissionError(
-                                    f"Judge HTTP {response.status}; check endpoint/model/credentials"
-                                )
+                                details = await _http_error_summary(response, cfg.get("error_log_dir"))
+                                if response.status == 400:
+                                    # A rejected completion is not necessarily an auth/config error.
+                                    # Retry this status only a bounded number of times, even when
+                                    # transient transport failures are configured to block forever.
+                                    bad_requests += 1
+                                    if bad_requests >= cfg.get("max_attempts", 3):
+                                        raise RuntimeError(f"Judge HTTP 400 after {bad_requests} attempts; {details}")
+                                    logger.warning("Judge HTTP 400, retrying (%d); %s", bad_requests, details)
+                                else:
+                                    raise PermissionError(f"Judge HTTP {response.status}; {details}")
                             response.raise_for_status()
                             body = await response.json()
                             return body["choices"][0]["message"].get("content") or ""
@@ -115,6 +122,33 @@ class JudgeRuntime:
             return {"score": 0.0, "judged": 0.0, "truncated": float(fault == "truncated")}
         parsed = judge.parse_reply(await self.chat(prompt))
         return {"score": float(parsed["reward"]), "judged": float(parsed["ok"]), "truncated": 0.0}
+
+
+async def _http_error_summary(response, error_log_dir=None):
+    # Provider messages can echo prompts. Keep only bounded machine-readable
+    # identifiers so diagnostics cannot publish responses or credentials.
+    try:
+        body = await response.json(content_type=None)
+    except (ValueError, aiohttp.ContentTypeError):
+        body = {}
+    if error_log_dir:
+        # Response messages can contain private prompt text. Save only to an
+        # explicitly configured private directory; never log them or headers.
+        directory = Path(error_log_dir)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=directory, prefix="judge-error-", suffix=".json", delete=False
+        ) as f:
+            json.dump({"status": response.status, "body": body}, f)
+    error = body.get("error", {}) if isinstance(body, dict) else {}
+    if not isinstance(error, dict):
+        error = {}
+    values = {name: error.get(name) for name in ("type", "code", "param")}
+    values["request_id"] = response.headers.get("x-request-id")
+    return ", ".join(
+        f"{name}={value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', value) else 'unavailable'}"
+        for name, value in values.items()
+    )
 
 
 @lru_cache

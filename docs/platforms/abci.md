@@ -74,8 +74,10 @@ its synchronous `build_prompt(problem, rubric, reference, answer)` returns text 
 methods. The answer token budget truncates only the answer, preserving the problem
 and rubric, as in the baseline this adapter was built for.
 
-Transient HTTP failures retry with capped backoff and honor cancellation. Permanent
-4xx failures stop the run instead of silently assigning zero rewards. Parse failures
+Transient HTTP failures retry with capped backoff and honor cancellation. HTTP 400
+responses receive at most `max_attempts` attempts (default three); other permanent
+4xx failures stop immediately. Exhaustion stops the run rather than assigning zero
+rewards. Errors include bounded provider codes and request IDs, never raw messages. Parse failures
 use the application parser's error score. Unknown score types, missing rubric/reference data,
 or credentials fail explicitly.
 
@@ -139,6 +141,12 @@ CPU staging copy. This option requires synchronous, persistent, model-only saves
 the 9B optimizer checkpoint path is unchanged.
 The 122B production topology is deliberately not selected by this recipe.
 
+The production PBS template requests 64 hours. For a continuation, set `MILES_LOAD`
+and `MILES_CHECKPOINT_DIR` to the same existing checkpoint root. This restores
+training and rollout state and lets retention delete the previous checkpoint
+after its replacement succeeds, without copying model weights. `MILES_NUM_ROLLOUT`
+is the total update target, including restored updates.
+
 For the 100-update 9B baseline, `examples/platforms/abci/train.pbs` allocates two nodes and invokes `tools/abci/launch.py` with
 `--mode train` explicitly; the default mode is read-only preflight. Set `MILES_ROLLOUT_NODES=3` and `MILES_NUM_ROLLOUT=120`, and override PBS
 with `-l select=4`, for one trainer node plus three rollout nodes. The wrapper uses
@@ -172,3 +180,12 @@ exponentiation. The PPO path remains the default for other recipes.
 Resume from a Miles checkpoint using the recipe's `--load` argument. Optimizer-state
 resume from a verl checkpoint is not supported. Before production, validate GPU
 smoke, checkpoint restart, live judge scoring, and memory at the intended length.
+
+For a validated continuation, set `MILES_EVAL_BEFORE_TRAIN=1`: the async driver
+evaluates the restored policy before requesting any training batch. Set
+`MILES_SAVE_INTERVAL=5` (the default) to save every five optimizer updates.
+Rollout state is saved before publishing each model checkpoint.
+
+The optional judge JSON `error_log_dir` stores provider error bodies in mode-600
+files for local diagnosis. Treat that directory as private: provider messages may
+echo prompt text. Public logs contain only error codes and request identifiers.
