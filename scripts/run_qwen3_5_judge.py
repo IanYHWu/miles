@@ -120,6 +120,12 @@ def _train_args(args):
     if colocate:
         engines += "--colocate --use-rollout-routing-replay --no-save-optim --sglang-disable-cuda-graph "
         engines += "--streaming-model-checkpoint-save "
+        # Back only the GPU-resident sleep-window state with disk. CPU-canonical
+        # optimizer moments stay in RAM; streaming the entire optimizer is unnecessary.
+        engines += (
+            "--offload-train-target disk "
+            f"--offload-train-disk-dir {q(f'{args.output_dir}/{args.run_id}/offload')} "
+        )
         performance += "--expert-model-parallel-size 8 --expert-tensor-parallel-size 1 "
         # CPU Adam retains a second full gradient copy. Stage optimizer state in
         # small GPU windows instead, retaining FP32 moments and TE's exact masters.

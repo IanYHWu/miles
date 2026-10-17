@@ -105,6 +105,11 @@ state offload, FP32 moments, and exact master weights stored using TE's paramete
 remainders. This avoids a full CPU gradient copy and limits GPU moment residency
 to small windows. The 9B recipe retains CPU optimizer offload. GPU capacity must
 include the first optimizer step, not just loading and backward.
+During the handoff to inference, GPU-resident trainer state is backed to the
+run's `offload` directory on disk, preventing another host-memory copy. This is
+separate from streaming the entire optimizer: the canonical optimizer moments
+remain in RAM. Allow at least 600 GiB of free quota for the temporary backing
+files and model checkpoint. Use a real disk filesystem; ABCI's `/tmp` is tmpfs.
 The model-only smoke checkpoint uses `--streaming-model-checkpoint-save` to write
 tensors incrementally through PyTorch's synchronous writer. It preserves Megatron's
 distributed checkpoint keys and shard metadata while avoiding a full additional
