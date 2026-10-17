@@ -11,7 +11,11 @@ set -euo pipefail
 mkdir -p "${MILES_SCRATCH}/logs"
 exec > "${MILES_SCRATCH}/logs/${PBS_JOBID}.log" 2>&1
 free -h
-exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode smoke \
+case "${MILES_SMOKE_MODE:-smoke}" in
+  smoke|async-smoke) ;;
+  *) echo "MILES_SMOKE_MODE must be smoke or async-smoke" >&2; exit 2 ;;
+esac
+exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode "${MILES_SMOKE_MODE:-smoke}" \
   --repo "${MILES_REPO}" --image "${MILES_IMAGE}" --scratch "${MILES_SCRATCH}" \
   --container-root "${MILES_CONTAINER_ROOT:-}" \
   --model-dir "${MILES_MODEL_DIR}" --data-dir "${MILES_DATA_DIR}" \

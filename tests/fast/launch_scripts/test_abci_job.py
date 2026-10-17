@@ -59,3 +59,32 @@ def test_resume_checks_new_gradients_without_comparing_to_pretrained_weights(mon
     assert "--debug-exit-after-rollout" not in calls[1][-1]
     assert Path(calls[1][calls[1].index("--load") + 1]) == run_dir / "checkpoints"
     assert "--num-rollout 3" in calls[1][-1]
+
+
+def test_async_smoke_validates_in_a_fresh_interpreter(monkeypatch, tmp_path):
+    args = launch._parser().parse_args(
+        [
+            "--mode",
+            "async-smoke",
+            "--image",
+            "unused",
+            "--repo",
+            "unused",
+            "--scratch",
+            str(tmp_path),
+            "--model-dir",
+            "unused",
+            "--data-dir",
+            "unused",
+            "--judge-config",
+            "unused",
+        ]
+    )
+    monkeypatch.setenv("PBS_JOBID", "456.pbs")
+    calls = []
+    monkeypatch.setattr(launch, "_run", calls.append)
+    launch._execute_recipe(args)
+    assert len(calls) == 2
+    assert "--async-smoke" in calls[0]
+    assert "--custom-megatron-before-train-step-hook-path" in calls[0][-1]
+    assert calls[1][1:3] == ["-m", "tests.manual.async_baseline_fixture"]

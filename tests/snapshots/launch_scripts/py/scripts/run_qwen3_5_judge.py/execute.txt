@@ -64,7 +64,7 @@ nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l
   --fully-async
   --pause-generation-mode in_place
   --update-weights-interval 2
-  --max-weight-staleness 1
+  --max-weight-staleness 2
   --async-max-concurrent-samples 1024
   --advantage-estimator grpo
   --policy-loss-type cispo

@@ -94,6 +94,24 @@ Before synthetic training, preflight sends a known-answer probe to each configur
 judge and requires a successful score. This verifies live rubric and binary scoring
 without treating the synthetic training rewards as an end-to-end judge evaluation.
 
+Set `MILES_SMOKE_MODE=async-smoke` on the same one-node PBS script for a 9B
+async stress test. It uses separate trainer and rollout GPUs, native requests
+of varying lengths, repeated weight publications, and synthetic rewards. The
+wrapper fails unless mixed-version trajectories reach training, all gradient
+norms are finite and positive, published weights change, and the final checkpoint
+exists. Token-version and log-probability alignment are checked on completed
+samples. Evidence lives in `async-evidence.jsonl` and `async-result.json` in the
+run directory. This test does not repeat the basic smoke's checkpoint restart.
+Its CI sample-ownership checker allows eight steps for an issued sample to
+resolve: the default two-step grace period can misclassify legitimate long or
+buffered trajectories as lost. This allowance does not relax the policy's
+staleness filter or the check against duplicate training consumption.
+
+Weight versions advance on every optimizer update. The baseline's staleness
+limit is two, allowing samples to survive one publication at its two-update
+cadence. This is a version-gap filter, not a direct translation of verl's
+rollout-production budget. Monitor stale-group drops when tuning long responses.
+
 Set `MILES_MODEL_NAME=Qwen3.5-122B-A10B` for the full-size MoE smoke. This uses
 all eight GPUs with colocated training/rollout, TP4/EP8 training, TP8 inference,
 rollout routing replay, and one short update. It saves model weights only; the

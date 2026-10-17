@@ -17,7 +17,7 @@ from pathlib import Path
 
 def _parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--mode", choices=["preflight", "smoke", "train"], default="preflight")
+    p.add_argument("--mode", choices=["preflight", "smoke", "async-smoke", "train"], default="preflight")
     for name in ("image", "repo", "scratch", "model-dir", "data-dir", "judge-config"):
         p.add_argument("--" + name, required=True)
     p.add_argument("--private-pythonpath", default="")
@@ -82,7 +82,7 @@ def _preflight(args):
         "--judge-config",
         args.judge_config,
     ]
-    if args.mode == "smoke":
+    if args.mode in ("smoke", "async-smoke"):
         command += ["--probe-judge"]
     _run(command)
 
@@ -109,7 +109,7 @@ def _execute_recipe(args):
         "--run-id",
         run_id,
     ]
-    if args.mode != "smoke":
+    if args.mode not in ("smoke", "async-smoke"):
         argv += ["--load", args.load, "--wandb-project", args.wandb_project, "--wandb-entity", args.wandb_entity]
         _run(argv)
         return
@@ -129,6 +129,21 @@ def _execute_recipe(args):
         f"--ci-save-grad-norm {shlex.quote(str(run_dir / 'grad-{rollout_id}.pt'))} "
         "--log-inference-engine-weight-checksums"
     )
+    if args.mode == "async-smoke":
+        extra += (
+            # The CI default (two steps) declares legitimate long/in-flight or
+            # buffered groups lost before the async consumer can resolve them.
+            " --sample-ownership-grace-steps 8 "
+            "--custom-generate-function-path tests.manual.async_baseline_fixture.generate "
+            "--custom-rollout-log-function-path tests.manual.async_baseline_fixture.log_rollout_data "
+            "--custom-megatron-before-train-step-hook-path tests.manual.async_baseline_fixture.before_train"
+        )
+        _run(argv + ["--async-smoke", "--extra-args", extra])
+        # A fresh interpreter picks up the repository PYTHONPATH set by the
+        # container bootstrap; changing os.environ does not alter sys.path here.
+        _run([sys.executable, "-m", "tests.manual.async_baseline_fixture", str(run_dir)])
+        print("GPU async smoke: 9B, mixed-version training, repeated weight sync, finite gradients", flush=True)
+        return
     restart = args.model_name == "Qwen3.5-9B"
     # Keep the scheduler horizon identical across interruption and restart.
     initial_extra = extra + (" --num-rollout 3 --debug-exit-after-rollout 2" if restart else "")

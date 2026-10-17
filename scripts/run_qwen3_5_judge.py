@@ -46,17 +46,23 @@ class ScriptArgs(U.ExecuteTrainConfig):
     clip_low: float = 10.0
     clip_high: float = 4.0
     update_interval: int = 2
-    max_weight_staleness: int = 1
+    # Versions advance per optimizer step, not per weight publication.
+    max_weight_staleness: int = 2
     concurrency: int = 1024
     eval_interval: int = 30
     save_interval: int = 20
     smoke: bool = False
+    async_smoke: bool = False
     load: str = ""
     extra_args: str = ""
     wandb_project: str = ""
     wandb_entity: str = ""
 
     def __post_init__(self):
+        if self.async_smoke:
+            if self.model_name != "Qwen3.5-9B":
+                raise ValueError("The async smoke requires separate 9B trainer and rollout GPUs")
+            self.smoke = True
         if self.model_name == "Qwen3.5-122B-A10B" and not self.smoke:
             raise ValueError("The 122B production topology must be sized separately; use --smoke for validation")
         if self.smoke:
@@ -69,6 +75,9 @@ class ScriptArgs(U.ExecuteTrainConfig):
                 self.train_tp, self.rollout_tp = 4, 8
                 self.samples_per_prompt = 4
                 self.update_interval, self.num_rollout = 1, 1
+        if self.async_smoke:
+            self.num_rollout = 12
+            self.response_length, self.context_length, self.concurrency = 4096, 8192, 16
         if self.actor_gpus % self.train_tp or self.rollout_gpus % self.rollout_tp:
             raise ValueError("GPU counts must be divisible by their tensor parallel sizes")
 
@@ -80,7 +89,7 @@ def _train_args(args):
     checkpoint = (
         f"--hf-checkpoint {q(model)} --ref-load {q(model)} --load {q(args.load or model)} "
         f"--save {q(f'{args.output_dir}/{args.run_id}/checkpoints')} "
-        f"--save-interval {2 if args.smoke else args.save_interval} "
+        f"--save-interval {args.num_rollout if args.async_smoke else 2 if args.smoke else args.save_interval} "
     )
     rollout = (
         f"--prompt-data {q(args.data_dir + '/train.parquet')} --input-key prompt "
