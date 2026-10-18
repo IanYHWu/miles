@@ -2,7 +2,8 @@
 
 No job is submitted by this command. Use --mode smoke for short synthetic-reward
 updates; --mode train must be selected explicitly for real judge-scored training.
-All writable paths belong under --scratch. Credentials never appear in argv.
+Runtime outputs belong under --scratch; --checkpoint-dir may use separate group storage.
+Credentials never appear in argv.
 """
 
 import argparse
@@ -28,7 +29,14 @@ def _parser():
     p.add_argument("--checkpoint-dir", default="")
     p.add_argument("--save-interval", type=int, default=5)
     p.add_argument("--eval-before-train", action="store_true")
+    p.add_argument("--actor-nodes", type=int, default=1)
     p.add_argument("--rollout-nodes", type=int, default=1)
+    p.add_argument("--train-tp", type=int, default=4)
+    p.add_argument("--train-cp", type=int, default=1)
+    p.add_argument("--train-ep", type=int, default=1)
+    p.add_argument("--rollout-tp", type=int, default=1)
+    p.add_argument("--optimizer-cpu-offload", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--verify-resume-after-updates", type=int, default=0)
     p.add_argument("--num-rollout", type=int, default=100)
     p.add_argument("--wandb-project", default="")
     p.add_argument("--wandb-entity", default="")
@@ -126,6 +134,17 @@ def _execute_recipe(args):
             args.wandb_project,
             "--wandb-entity",
             args.wandb_entity,
+            "--actor-num-nodes",
+            str(args.actor_nodes),
+            "--train-tp",
+            str(args.train_tp),
+            "--train-cp",
+            str(args.train_cp),
+            "--train-ep",
+            str(args.train_ep),
+            "--rollout-tp",
+            str(args.rollout_tp),
+            "--optimizer-cpu-offload" if args.optimizer_cpu_offload else "--no-optimizer-cpu-offload",
             "--rollout-gpus",
             str(8 * args.rollout_nodes),
             "--num-rollout",
@@ -133,7 +152,10 @@ def _execute_recipe(args):
         ]
         if args.eval_before_train:
             argv.append("--no-skip-eval-before-train")
-        _run(argv)
+        if args.verify_resume_after_updates:
+            _verify_training_resume(args, argv, run_dir)
+        else:
+            _run(argv)
         return
     import torch
 
@@ -187,6 +209,26 @@ def _execute_recipe(args):
         f"GPU smoke: {args.model_name}, finite nonzero gradients, weight sync, checkpoint saved; restart={restart}",
         flush=True,
     )
+
+
+def _verify_training_resume(args, argv, run_dir):
+    """Stop after a real save, then restore the full training stack before continuing."""
+    updates = args.verify_resume_after_updates
+    if args.load or updates <= 0 or updates >= args.num_rollout or updates % args.save_interval:
+        raise ValueError("Resume verification needs a fresh run and a save-aligned stop before the total target")
+    checkpoint = Path(args.checkpoint_dir) if args.checkpoint_dir else run_dir / "checkpoints"
+    tracker = checkpoint / "latest_checkpointed_iteration.txt"
+    if tracker.exists():
+        raise RuntimeError(f"Refusing to overwrite existing training checkpoint: {checkpoint}")
+    _run(argv + ["--extra-args", f"--debug-exit-after-rollout {updates}"])
+    if not tracker.is_file() or int(tracker.read_text()) != updates - 1:
+        raise RuntimeError("Initial training phase did not publish the expected checkpoint")
+    resumed = list(argv)
+    resumed[resumed.index("--load") + 1] = str(checkpoint)
+    if "--no-skip-eval-before-train" not in resumed:
+        resumed.append("--no-skip-eval-before-train")
+    print(f"Restoring full model, optimizer and rollout checkpoint after {updates} updates", flush=True)
+    _run(resumed)
 
 
 def _container_role(args):
@@ -276,9 +318,9 @@ def _host(args):
         raise SystemExit("Run inside a PBS allocation; never launch GPU workloads on a login node")
     slots = Path(nodefile).read_text().split()
     nodes = list(dict.fromkeys(slots))
-    if args.rollout_nodes < 1 or args.num_rollout < 1:
-        raise SystemExit("rollout-nodes and num-rollout must be positive")
-    expected = 1 + args.rollout_nodes if args.mode == "train" else 1
+    if min(args.actor_nodes, args.rollout_nodes, args.num_rollout) < 1:
+        raise SystemExit("actor-nodes, rollout-nodes and num-rollout must be positive")
+    expected = args.actor_nodes + args.rollout_nodes if args.mode == "train" else 1
     if len(nodes) != expected:
         raise SystemExit(f"{args.mode} requires {expected} node(s), found {len(nodes)}")
     for path in (args.image, args.repo, args.model_dir, args.data_dir, args.judge_config):
@@ -305,6 +347,13 @@ def _host(args):
         "--env",
         "PBS_JOBID=" + os.environ["PBS_JOBID"],
     ]
+    if args.checkpoint_dir:
+        checkpoint = Path(args.checkpoint_dir)
+        if not checkpoint.is_absolute():
+            raise SystemExit("--checkpoint-dir must be absolute for a multi-node bind")
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        # Only the explicitly selected checkpoint directory is writable under /groups.
+        command += ["--bind", f"{checkpoint}:{checkpoint}:rw"]
     if args.container_root:
         command += ["--bind", args.container_root + ":/root:ro"]
     command += [args.image, "python", str(Path(args.repo) / "tools/abci/launch.py")]

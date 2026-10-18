@@ -139,7 +139,22 @@ tensors incrementally through PyTorch's synchronous writer. It preserves Megatro
 distributed checkpoint keys and shard metadata while avoiding a full additional
 CPU staging copy. This option requires synchronous, persistent, model-only saves;
 the 9B optimizer checkpoint path is unchanged.
-The 122B production topology is deliberately not selected by this recipe.
+For dedicated 122B training, set `MILES_MODEL_NAME=Qwen3.5-122B-A10B`,
+`MILES_ACTOR_NODES=4`, `MILES_ROLLOUT_NODES=4`, `MILES_TRAIN_TP=4`,
+`MILES_TRAIN_CP=2`, `MILES_TRAIN_EP=32`, and `MILES_ROLLOUT_TP=8`,
+then request eight nodes. `MILES_OPTIMIZER_CPU_OFFLOAD=0` selects GPU Adam
+with FP32 moments; production saves include optimizer state. This configuration
+uses rollout routing replay and disaggregated inference with `in_place` pauses.
+Long-sequence peak memory must still be measured on the allocated GPUs.
+
+`MILES_CHECKPOINT_DIR` may select a dedicated directory on group storage. The
+wrapper binds that directory writable while keeping the rest of `/groups`
+read-only. `MILES_RAY_OBJECT_STORE_GB` sizes each node's object store; routed
+expert traces at long context are substantially larger than dense-model samples.
+For a fresh run, `MILES_VERIFY_RESUME_AFTER_UPDATES=5` stops after the first
+five-update checkpoint, checks its tracker, and relaunches from it with validation
+before continuing to the unchanged total target. It fails closed if the first
+phase fails or the expected checkpoint is missing.
 
 The production PBS template requests 64 hours. For a continuation, set `MILES_LOAD`
 and `MILES_CHECKPOINT_DIR` to the same existing checkpoint root. This restores

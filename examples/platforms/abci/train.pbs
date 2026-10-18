@@ -14,6 +14,9 @@ extra_args=()
 if [[ "${MILES_EVAL_BEFORE_TRAIN:-0}" == "1" ]]; then
   extra_args+=(--eval-before-train)
 fi
+if [[ "${MILES_OPTIMIZER_CPU_OFFLOAD:-1}" == "0" ]]; then
+  extra_args+=(--no-optimizer-cpu-offload)
+fi
 exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode train \
   --repo "${MILES_REPO}" --image "${MILES_IMAGE}" --scratch "${MILES_SCRATCH}" \
   --container-root "${MILES_CONTAINER_ROOT:-}" \
@@ -22,5 +25,9 @@ exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode train \
   --judge-config "${MILES_JUDGE_CONFIG}" --private-pythonpath "${MILES_PRIVATE_PYTHONPATH:-}" \
   --credentials-file "${MILES_CREDENTIALS_FILE:-}" --load "${MILES_LOAD:-}" \
   --checkpoint-dir "${MILES_CHECKPOINT_DIR:-}" --save-interval "${MILES_SAVE_INTERVAL:-5}" \
-  --rollout-nodes "${MILES_ROLLOUT_NODES:-1}" --num-rollout "${MILES_NUM_ROLLOUT:-100}" \
+  --actor-nodes "${MILES_ACTOR_NODES:-1}" --rollout-nodes "${MILES_ROLLOUT_NODES:-1}" \
+  --train-tp "${MILES_TRAIN_TP:-4}" --train-cp "${MILES_TRAIN_CP:-1}" --train-ep "${MILES_TRAIN_EP:-1}" \
+  --rollout-tp "${MILES_ROLLOUT_TP:-1}" --num-rollout "${MILES_NUM_ROLLOUT:-100}" \
+  --ray-object-store-gb "${MILES_RAY_OBJECT_STORE_GB:-16}" \
+  --verify-resume-after-updates "${MILES_VERIFY_RESUME_AFTER_UPDATES:-0}" \
   --wandb-project "${MILES_WANDB_PROJECT:-}" --wandb-entity "${MILES_WANDB_ENTITY:-}" "${extra_args[@]}"

@@ -35,6 +35,9 @@ class ScriptArgs(U.ExecuteTrainConfig):
     actor_gpus: int = 8
     rollout_gpus: int = 8
     train_tp: int = 4
+    train_cp: int = 1
+    train_ep: int = 1
+    optimizer_cpu_offload: bool = True
     rollout_tp: int = 1
     num_rollout: int = 100
     rollout_batch_size: int = 32
@@ -66,8 +69,6 @@ class ScriptArgs(U.ExecuteTrainConfig):
             if self.model_name != "Qwen3.5-9B":
                 raise ValueError("The async smoke requires separate 9B trainer and rollout GPUs")
             self.smoke = True
-        if self.model_name == "Qwen3.5-122B-A10B" and not self.smoke:
-            raise ValueError("The 122B production topology must be sized separately; use --smoke for validation")
         if self.smoke:
             self.actor_num_nodes, self.actor_gpus, self.rollout_gpus = 1, 4, 4
             self.num_rollout, self.rollout_batch_size, self.samples_per_prompt = 2, 2, 2
@@ -76,6 +77,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
                 # Colocation fits the full 122B model on the one-node test budget.
                 self.actor_gpus, self.rollout_gpus = 8, 8
                 self.train_tp, self.rollout_tp = 4, 8
+                self.train_ep = 8
                 self.samples_per_prompt = 4
                 self.update_interval, self.num_rollout = 1, 1
         if self.async_smoke:
@@ -83,14 +85,25 @@ class ScriptArgs(U.ExecuteTrainConfig):
             self.max_weight_staleness = 6 if self.max_weight_staleness is None else self.max_weight_staleness
             self.num_rollout = 12
             self.response_length, self.context_length, self.concurrency = 4096, 8192, 16
-        if self.actor_gpus % self.train_tp or self.rollout_gpus % self.rollout_tp:
-            raise ValueError("GPU counts must be divisible by their tensor parallel sizes")
+        train_gpus = self.actor_num_nodes * self.actor_gpus
+        if (
+            min(self.actor_num_nodes, self.actor_gpus, self.train_tp, self.train_cp, self.train_ep, self.rollout_tp)
+            < 1
+        ):
+            raise ValueError("Parallel sizes and GPU counts must be positive")
+        if train_gpus % (self.train_tp * self.train_cp) or train_gpus % self.train_ep:
+            raise ValueError("Training GPUs must be divisible by TP * CP and by expert parallel size")
+        if self.rollout_gpus % self.rollout_tp:
+            raise ValueError("Rollout GPUs must be divisible by inference TP")
+        if self.model_name == "Qwen3.5-122B-A10B" and not self.smoke and self.train_ep == 1:
+            raise ValueError("122B production requires an explicit expert-parallel topology")
 
 
 def _train_args(args):
     q = shlex.quote
     model = f"{args.model_dir}/{args.model_name}"
-    colocate = args.model_name == "Qwen3.5-122B-A10B"
+    moe = args.model_name == "Qwen3.5-122B-A10B"
+    colocate = moe and args.smoke
     checkpoint_dir = args.checkpoint_dir or f"{args.output_dir}/{args.run_id}/checkpoints"
     checkpoint = f"--hf-checkpoint {q(model)} --ref-load {q(model)} --load {q(args.load or model)} --save {q(checkpoint_dir)} --save-interval {args.num_rollout if args.async_smoke else 2 if args.smoke else args.save_interval} "
     if args.keep_latest_checkpoint and not args.smoke:
@@ -117,7 +130,7 @@ def _train_args(args):
     optimizer = f"--optimizer adam --lr {args.lr} --lr-decay-style constant --weight-decay 0.01 --adam-beta1 0.9 --adam-beta2 0.999 --clip-grad 1 "
     performance = (
         f"--seed 42 --tensor-model-parallel-size {args.train_tp} --sequence-parallel "
-        "--pipeline-model-parallel-size 1 --context-parallel-size 1 --micro-batch-size 1 "
+        f"--pipeline-model-parallel-size 1 --context-parallel-size {args.train_cp} --micro-batch-size 1 "
         "--recompute-granularity full --recompute-method uniform --recompute-num-layers 1 "
         "--log-probs-chunk-size 256 --attention-dropout 0 --hidden-dropout 0 "
         "--accumulate-allreduce-grads-in-fp32 --attention-softmax-in-fp32 --attention-backend flash "
@@ -128,20 +141,25 @@ def _train_args(args):
         f"--rollout-num-gpus-per-engine {args.rollout_tp} --sglang-context-length {args.context_length} "
         "--sglang-mem-fraction-static 0.85 --sglang-max-running-requests 64 --sglang-chunked-prefill-size 8192 "
     )
+    if moe:
+        engines += "--use-rollout-routing-replay "
+        performance += f"--expert-model-parallel-size {args.train_ep} --expert-tensor-parallel-size 1 "
     if colocate:
-        engines += "--colocate --use-rollout-routing-replay --no-save-optim --sglang-disable-cuda-graph "
+        engines += "--colocate --no-save-optim --sglang-disable-cuda-graph "
         engines += "--streaming-model-checkpoint-save "
         # Back only the GPU-resident sleep-window state with disk. CPU-canonical
         # optimizer moments stay in RAM; streaming the entire optimizer is unnecessary.
         engines += (
             f"--offload-train-target disk --offload-train-disk-dir {q(f'{args.output_dir}/{args.run_id}/offload')} "
         )
-        performance += "--expert-model-parallel-size 8 --expert-tensor-parallel-size 1 "
         # CPU Adam retains a second full gradient copy. Stage optimizer state in
         # small GPU windows instead, retaining FP32 moments and TE's exact masters.
         optimizer += "--use-precision-aware-optimizer --chunked-optimizer-state-offload --optimizer-state-offload-fraction 1.0 --optimizer-state-offload-chunk-size-mb 256 --main-params-dtype fp32 --exp-avg-dtype fp32 --exp-avg-sq-dtype fp32 "
     else:
-        optimizer += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
+        if args.optimizer_cpu_offload:
+            optimizer += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
+        else:
+            optimizer += "--use-precision-aware-optimizer --main-params-dtype fp32 --exp-avg-dtype fp32 --exp-avg-sq-dtype fp32 "
         engines += f"--rollout-num-gpus {args.rollout_gpus} --namespaced-radix-cache "
     evaluation = (
         ""

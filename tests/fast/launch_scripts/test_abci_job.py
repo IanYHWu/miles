@@ -133,9 +133,10 @@ def test_train_forwards_rollout_topology_and_update_count(monkeypatch, tmp_path)
     assert argv[argv.index("--save-interval") + 1] == "5"
 
 
-def test_four_node_host_starts_all_workers_using_pbs_slot_indices(monkeypatch, tmp_path):
+@pytest.mark.parametrize("actor_nodes,rollout_nodes", [(1, 3), (4, 4)])
+def test_host_starts_all_workers_using_pbs_slot_indices(monkeypatch, tmp_path, actor_nodes, rollout_nodes):
     nodefile = tmp_path / "nodes"
-    nodefile.write_text("head\nhead\na\na\nb\nb\nc\nc\n")
+    nodefile.write_text("".join(f"node{i}\nnode{i}\n" for i in range(actor_nodes + rollout_nodes)))
     monkeypatch.setenv("PBS_JOBID", "789.pbs")
     monkeypatch.setenv("PBS_NODEFILE", str(nodefile))
     args = launch._parser().parse_args(
@@ -154,8 +155,12 @@ def test_four_node_host_starts_all_workers_using_pbs_slot_indices(monkeypatch, t
             str(tmp_path),
             "--judge-config",
             str(tmp_path),
+            "--actor-nodes",
+            str(actor_nodes),
             "--rollout-nodes",
-            "3",
+            str(rollout_nodes),
+            "--checkpoint-dir",
+            str(tmp_path / "group-checkpoints"),
             "--num-rollout",
             "120",
         ]
@@ -173,7 +178,43 @@ def test_four_node_host_starts_all_workers_using_pbs_slot_indices(monkeypatch, t
     head = Mock()
     monkeypatch.setattr(launch, "_run_head", head)
     launch._host(args)
-    assert [command[2] for command in commands] == ["2", "4", "6"]
-    assert len(head.call_args.args[1]) == 3
+    assert [command[2] for command in commands] == [str(2 * i) for i in range(1, actor_nodes + rollout_nodes)]
+    assert len(head.call_args.args[1]) == actor_nodes + rollout_nodes - 1
+    assert f"{tmp_path}/group-checkpoints:{tmp_path}/group-checkpoints:rw" in head.call_args.args[0]
+    assert "/groups:/groups:ro" in head.call_args.args[0]
     for worker in workers:
         worker.terminate.assert_called_once()
+
+
+@pytest.mark.parametrize("initial_failure", [False, True])
+def test_production_resume_verification_requires_published_checkpoint(monkeypatch, tmp_path, initial_failure):
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(
+        verify_resume_after_updates=5,
+        load="",
+        num_rollout=120,
+        save_interval=5,
+        checkpoint_dir=str(tmp_path),
+    )
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        if not initial_failure:
+            (tmp_path / "latest_checkpointed_iteration.txt").write_text("4")
+
+    monkeypatch.setattr(launch, "_run", run)
+    argv = ["python", "recipe.py", "--load", "", "--num-rollout", "120"]
+    if initial_failure:
+        with pytest.raises(RuntimeError, match="expected checkpoint"):
+            launch._verify_training_resume(args, argv, tmp_path)
+        assert len(calls) == 1
+    else:
+        launch._verify_training_resume(args, argv, tmp_path)
+        assert len(calls) == 2
+        assert calls[0][-1] == "--debug-exit-after-rollout 5"
+        assert calls[1][calls[1].index("--load") + 1] == str(tmp_path)
+        assert "--no-skip-eval-before-train" in calls[1]
+        assert "--extra-args" not in calls[1]
+        assert calls[1][calls[1].index("--num-rollout") + 1] == "120"

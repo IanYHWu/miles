@@ -79,3 +79,52 @@ def test_resume_can_save_into_original_checkpoint_root():
     assert "--skip-eval-before-train" not in flags
     assert flags[flags.index("--save-interval") + 1] == "5"
     assert flags[flags.index("--save-retain-interval") + 1] == "125"
+
+
+def test_122b_dedicated_training_preserves_full_checkpoints_and_async_replay():
+    launcher = import_launch_script(REPO_ROOT / "scripts/run_qwen3_5_judge.py")
+    args = launcher.ScriptArgs(
+        model_name="Qwen3.5-122B-A10B",
+        actor_num_nodes=4,
+        rollout_gpus=32,
+        train_tp=4,
+        train_cp=2,
+        train_ep=32,
+        rollout_tp=8,
+        optimizer_cpu_offload=False,
+        num_rollout=120,
+        checkpoint_dir="/groups/project/checkpoints/run",
+    )
+    flags = shlex.split(launcher._train_args(args))
+    for flag, expected in {
+        "--actor-num-nodes": "4",
+        "--actor-num-gpus-per-node": "8",
+        "--tensor-model-parallel-size": "4",
+        "--context-parallel-size": "2",
+        "--expert-model-parallel-size": "32",
+        "--expert-tensor-parallel-size": "1",
+        "--rollout-num-gpus": "32",
+        "--rollout-num-gpus-per-engine": "8",
+        "--pause-generation-mode": "in_place",
+        "--save-retain-interval": "125",
+        "--save": "/groups/project/checkpoints/run",
+    }.items():
+        assert flags[flags.index(flag) + 1] == expected
+    assert "--use-rollout-routing-replay" in flags
+    assert "--namespaced-radix-cache" in flags
+    for flag in (
+        "--colocate",
+        "--no-save-optim",
+        "--optimizer-cpu-offload",
+        "--streaming-model-checkpoint-save",
+        "--offload-train-target",
+    ):
+        assert flag not in flags
+
+
+def test_invalid_122b_parallelism_fails_before_starting_workers():
+    launcher = import_launch_script(REPO_ROOT / "scripts/run_qwen3_5_judge.py")
+    with pytest.raises(ValueError, match="explicit expert-parallel"):
+        launcher.ScriptArgs(model_name="Qwen3.5-122B-A10B")
+    with pytest.raises(ValueError, match="divisible"):
+        launcher.ScriptArgs(actor_num_nodes=4, train_ep=24)
