@@ -1,0 +1,121 @@
+### 0
+pkill -9 sglang; sleep 3; ray stop
+  --force; pkill -9 ray; pkill -9 miles; sleep 3; pkill -9 ray; pkill -9 miles; pkill -9 redis; true; 
+
+### 1
+export PYTHONUNBUFFERED=1 && ray start
+  --head
+  --node-ip-address 127.0.0.1
+  --num-gpus 8
+  --disable-usage-stats
+
+### 2
+nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l
+
+### 3
+[launcher lifetime] ray job submit
+  --address=http://127.0.0.1:8265
+  --runtime-env-json='{"env_vars": {"PYTHONUNBUFFERED": "1", "CUDA_DEVICE_MAX_CONNECTIONS": "1", "NCCL_NVLS_ENABLE": "0", "no_proxy": "127.0.0.1,127.0.0.1", "MASTER_ADDR": "127.0.0.1", "PYTHONPATH": "<REPO_ROOT>:/root/Megatron-LM:/frozen/pythonpath", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "PYTHONDONTWRITEBYTECODE": "1"}}'
+  -- python3 <REPO_ROOT>/train_sft.py
+  --spec miles_plugins.models.qwen3_5 get_qwen3_5_spec
+  --disable-bias-linear
+  --qk-layernorm
+  --group-query-attention
+  --num-attention-heads 32
+  --num-query-groups 2
+  --kv-channels 256
+  --num-layers 48
+  --hidden-size 3072
+  --ffn-hidden-size 1024
+  --normalization RMSNorm
+  --apply-layernorm-1p
+  --position-embedding-type rope
+  --norm-epsilon 1e-6
+  --rotary-percent 0.25
+  --swiglu
+  --untie-embeddings-and-output-weights
+  --vocab-size 248320
+  --rotary-base 10000000
+  --moe-ffn-hidden-size 1024
+  --moe-shared-expert-intermediate-size 1024
+  --moe-router-score-function softmax
+  --moe-token-dispatcher-type alltoall
+  --moe-router-topk 8
+  --moe-layer-freq '[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'
+  --num-experts 256
+  --moe-grouped-gemm
+  --moe-token-drop-policy probs
+  --moe-router-dtype fp32
+  --moe-permute-fusion
+  --moe-aux-loss-coeff 0
+  --attention-output-gate
+  --moe-shared-expert-gate
+  --mtp-num-layers 1
+  --hf-checkpoint /root/models/Qwen3.5-122B-A10B
+  --ref-load /root/models/Qwen3.5-122B-A10B
+  --load /root/checkpoints/qwen35-sft
+  --save /root/checkpoints/qwen35-sft
+  --save-interval 100
+  --rollout-function-path miles.rollout.sft_rollout.generate_rollout
+  --data-source-path miles.rollout.data_source.RolloutDataSource
+  --prompt-data /root/datasets
+  --sft-validation-data /root/datasets/validation.parquet
+  --input-key messages
+  --loss-mask-type qwen3
+  --rollout-shuffle
+  --rollout-seed 1
+  --num-rollout 4128
+  --num-epoch 6
+  --rollout-batch-size 128
+  --n-samples-per-prompt 1
+  --global-batch-size 128
+  --micro-batch-size 1
+  --loss-type sft_loss
+  --calculate-per-token-loss
+  --disable-compute-advantages-and-returns
+  --debug-train-only
+  --balance-data
+  --sft-eval-interval 100
+  --tensor-model-parallel-size 4
+  --sequence-parallel
+  --pipeline-model-parallel-size 3
+  --context-parallel-size 2
+  --expert-model-parallel-size 32
+  --expert-tensor-parallel-size 1
+  --recompute-granularity full
+  --recompute-method uniform
+  --recompute-num-layers 1
+  --seq-length 65536
+  --log-probs-chunk-size 256
+  --optimizer adam
+  --lr 2e-5
+  --lr-decay-style cosine
+  --min-lr 2e-7
+  --lr-warmup-iters 123
+  --weight-decay 0.01
+  --adam-beta1 0.9
+  --adam-beta2 0.999
+  --clip-grad 1
+  --seed 42
+  --use-precision-aware-optimizer
+  --main-params-dtype fp32
+  --exp-avg-dtype fp32
+  --exp-avg-sq-dtype fp32
+  --attention-dropout 0
+  --hidden-dropout 0
+  --accumulate-allreduce-grads-in-fp32
+  --attention-softmax-in-fp32
+  --attention-backend flash
+  --actor-num-nodes 12
+  --actor-num-gpus-per-node 8
+  --num-gpus-per-node 8
+  --sft-keep-best 
+  --use-wandb
+  --wandb-project miles-run_qwen3_5_sft
+  --wandb-group 260101-000000-000
+  --disable-wandb-random-suffix
+  --deploy-component all
+
+### 4
+ray stop
+  --force

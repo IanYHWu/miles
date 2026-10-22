@@ -654,6 +654,11 @@ class MegatronTrainRayActor(TrainRayActor):
             )
         return TrainStepOutput(outcome=train_step_outcome, values=values)
 
+    def evaluate_sft(self, rollout_id: int, rollout_data_ref: StoreObjectRef | list[StoreObjectRef]) -> dict:
+        from miles.backends.megatron_utils.sft_validation import evaluate_sft
+
+        return evaluate_sft(self, rollout_id, rollout_data_ref)
+
     def _use_rollout_replay(self, m) -> bool:
         return getattr(self.args, f"use_rollout_{m.name}_replay", False)
 

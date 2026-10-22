@@ -183,7 +183,9 @@ def _execute_recipe(args):
         # A fresh interpreter picks up the repository PYTHONPATH set by the
         # container bootstrap; changing os.environ does not alter sys.path here.
         _run([sys.executable, "-m", "tests.manual.async_baseline_fixture", str(run_dir)])
-        print("GPU async smoke: 9B, mixed-version training, repeated weight sync, finite gradients", flush=True)
+        print(
+            "GPU async smoke: 9B, mixed-version training, repeated weight sync, finite gradients", flush=True
+        )
         return
     restart = args.model_name == "Qwen3.5-9B"
     # Keep the scheduler horizon identical across interruption and restart.
@@ -215,7 +217,9 @@ def _verify_training_resume(args, argv, run_dir):
     """Stop after a real save, then restore the full training stack before continuing."""
     updates = args.verify_resume_after_updates
     if args.load or updates <= 0 or updates >= args.num_rollout or updates % args.save_interval:
-        raise ValueError("Resume verification needs a fresh run and a save-aligned stop before the total target")
+        raise ValueError(
+            "Resume verification needs a fresh run and a save-aligned stop before the total target"
+        )
     checkpoint = Path(args.checkpoint_dir) if args.checkpoint_dir else run_dir / "checkpoints"
     tracker = checkpoint / "latest_checkpointed_iteration.txt"
     if tracker.exists():
@@ -231,7 +235,7 @@ def _verify_training_resume(args, argv, run_dir):
     _run(resumed)
 
 
-def _container_role(args):
+def _container_role(args, *, preflight=_preflight, execute_recipe=_execute_recipe):
     _credentials(args.credentials_file)
     os.environ.update(
         {
@@ -265,7 +269,7 @@ def _container_role(args):
     )
     os.chdir(args.repo)
     if args.mode == "preflight":
-        _preflight(args)
+        preflight(args)
         return
     start = [
         "ray",
@@ -305,25 +309,35 @@ def _container_role(args):
         ]
     )
     try:
-        _preflight(args)
-        _execute_recipe(args)
+        preflight(args)
+        execute_recipe(args)
     finally:
         # This runs inside a dedicated PID namespace, never against another job.
         subprocess.run(["ray", "stop", "--force"], check=False)
 
 
-def _host(args):
+def _host(args, *, entrypoint=None, expected_nodes=None, required_inputs=None):
     nodefile = os.environ.get("PBS_NODEFILE")
     if not nodefile or not os.environ.get("PBS_JOBID"):
         raise SystemExit("Run inside a PBS allocation; never launch GPU workloads on a login node")
     slots = Path(nodefile).read_text().split()
     nodes = list(dict.fromkeys(slots))
-    if min(args.actor_nodes, args.rollout_nodes, args.num_rollout) < 1:
+    if expected_nodes is None and min(args.actor_nodes, args.rollout_nodes, args.num_rollout) < 1:
         raise SystemExit("actor-nodes, rollout-nodes and num-rollout must be positive")
-    expected = args.actor_nodes + args.rollout_nodes if args.mode == "train" else 1
+    expected = (
+        expected_nodes
+        if expected_nodes is not None
+        else (args.actor_nodes + args.rollout_nodes if args.mode == "train" else 1)
+    )
+    if expected < 1:
+        raise SystemExit("Node count must be positive")
     if len(nodes) != expected:
         raise SystemExit(f"{args.mode} requires {expected} node(s), found {len(nodes)}")
-    for path in (args.image, args.repo, args.model_dir, args.data_dir, args.judge_config):
+    for path in (
+        required_inputs
+        if required_inputs is not None
+        else (args.image, args.repo, args.model_dir, args.data_dir, args.judge_config)
+    ):
         if not Path(path).exists():
             raise SystemExit(f"Missing staged input: {path}")
     if args.container_root and not (Path(args.container_root) / "Megatron-LM").is_dir():
@@ -356,7 +370,7 @@ def _host(args):
         command += ["--bind", f"{checkpoint}:{checkpoint}:rw"]
     if args.container_root:
         command += ["--bind", args.container_root + ":/root:ro"]
-    command += [args.image, "python", str(Path(args.repo) / "tools/abci/launch.py")]
+    command += [args.image, "python", str(entrypoint or Path(args.repo) / "tools/abci/launch.py")]
     common = [x for x in sys.argv[1:]]
     workers = []
     try:
