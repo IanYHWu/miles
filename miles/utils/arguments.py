@@ -1578,6 +1578,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             reset_arg(parser, "--save", type=str, default=None)
             reset_arg(parser, "--save-interval", type=int, default=None)
             reset_arg(parser, "--async-save", action="store_true")
+            parser.add_argument(
+                "--streaming-model-checkpoint-save",
+                action="store_true",
+                help="Write synchronous Megatron model-only checkpoints without staging the full model on CPU.",
+            )
             reset_arg(
                 parser,
                 "--no-save-optim",
@@ -1645,6 +1650,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
 
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
+            parser.add_argument(
+                "--policy-loss-type",
+                choices=["ppo", "cispo"],
+                default="ppo",
+                help="Policy objective. CISPO clips detached importance weights at 1-eps-clip and 1+eps-clip-high.",
+            )
             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
             parser.add_argument(
                 "--eps-clip-c",
@@ -2486,6 +2497,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help="URL for the reward model service for --rm-type remote_rm, e.g. http://localhost:8000",
+            )
+            parser.add_argument(
+                "--llm-judge-config",
+                type=str,
+                default=None,
+                help="JSON configuration for miles.rollout.llm_judge.reward; credentials come from environment variables.",
             )
             parser.add_argument(
                 "--custom-rm-path",
@@ -3705,6 +3722,18 @@ def miles_validate_args(args):
 
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
+
+    if getattr(args, "streaming_model_checkpoint_save", False):
+        assert args.train_backend == "megatron" and args.ckpt_format == "torch_dist"
+        assert args.no_save_optim and not args.async_save, "Streaming save requires synchronous model-only checkpoints"
+        assert not args.indep_dp and not is_lora_enabled(args), "Streaming save supports a single full-model cell"
+        assert args.non_persistent_ckpt_type is None, "Streaming save supports persistent checkpoints only"
+
+    if getattr(args, "policy_loss_type", "ppo") == "cispo":
+        assert args.loss_type == "policy_loss", "CISPO requires --loss-type policy_loss"
+        assert args.advantage_estimator != "gspo", "CISPO uses token-level importance ratios, not GSPO"
+        assert args.eps_clip_c is None, "Dual clipping is not part of CISPO"
+        assert args.eps_clip >= 0 and args.eps_clip_high >= 0, "CISPO clipping offsets must be nonnegative"
 
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key

@@ -58,6 +58,8 @@
        "user-guide/argument-groups",
        "user-guide/fully-async",
        "user-guide/training-backend",
+       "user-guide/sft",
+       "user-guide/judged-training",
        "user-guide/monitoring",
        "user-guide/customization",
        "user-guide/generate-endpoint",
