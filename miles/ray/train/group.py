@@ -388,6 +388,13 @@ class TrainerController:
             max_attempts=_RETRY_MAX_ATTEMPTS,
         )
 
+    async def evaluate_sft(self, rollout_id: int, rollout_data_pack: RolloutDataPack) -> dict:
+        """Score gold responses without changing weights, optimizer, or training RNG."""
+        results = await self._execute_first_alive(
+            "evaluate_sft", rollout_id=rollout_id, rollout_data_ref=rollout_data_pack.data_ref
+        )
+        return results[0]
+
     async def update_weights(self, info: UpdatableEngines, rollout_id: int | None = None) -> int | None:
         """Broadcast weights to rollout engines and answer the version they now serve."""
         log_structured(logger.info, tag="ft", op="update_weights", phase="start", rollout=rollout_id)

@@ -251,6 +251,19 @@ def compute_gspo_kl(
 
 
 @torch.compile(dynamic=True)
+def compute_cispo_loss(log_probs, ppo_kl, advantages, eps_clip, eps_clip_high):
+    """Token CISPO: gradient flows through log_probs, never through the IS weight.
+
+    Clipping arguments are offsets from one, matching the PPO CLI convention.
+    Clamp log ratios before exponentiation, matching verl's CISPO objective.
+    The caller owns masking, parallel reduction, and loss normalization.
+    """
+    ratio = torch.exp(torch.clamp(-ppo_kl, min=-_LOG_RATIO_EXP_CLAMP, max=_LOG_RATIO_EXP_CLAMP))
+    clipped = ratio.clamp(1 - eps_clip, 1 + eps_clip_high)
+    return -clipped.detach() * advantages.detach() * log_probs, (ratio != clipped).float()
+
+
+@torch.compile(dynamic=True)
 def compute_policy_loss(
     ppo_kl: torch.Tensor,
     advantages: torch.Tensor,

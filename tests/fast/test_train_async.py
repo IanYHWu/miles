@@ -272,3 +272,46 @@ class TestTerminalLifecycle:
             events.index(event) < events.index("manager_shutdown") for event in events if event.endswith("_dispose")
         )
         assert events.index("manager_shutdown") < events.index("manager_kill")
+
+
+class TestCheckpointContinuation:
+    async def test_resume_evaluates_restored_policy_before_training(self, monkeypatch):
+        events = []
+        args = _make_args(start_rollout_id=20, num_rollout=21, eval_interval=30, eval_uses_snapshots=False)
+        components = _install_driver_fakes(monkeypatch, args, events)
+        await with_disposer(train_async_driver.train, args)
+        assert events.index("update_weights:None") < events.index("eval:19")
+        assert events.index("eval:19") < events.index("generate_start:20") < events.index("actor_train:20")
+        assert components.actor_model.trained == [20]
+
+    async def test_failed_resume_validation_prevents_training(self, monkeypatch):
+        events = []
+        args = _make_args(start_rollout_id=20, num_rollout=21, eval_interval=30, eval_uses_snapshots=False)
+        components = _install_driver_fakes(monkeypatch, args, events)
+
+        async def fail_eval(*args, **kwargs):
+            raise RuntimeError("judge failed")
+
+        monkeypatch.setattr(components.rollout_executor, "eval", fail_eval)
+        with pytest.raises(RuntimeError, match="judge failed"):
+            await with_disposer(train_async_driver.train, args)
+        assert components.actor_model.trained == []
+        assert not any(event.startswith("generate_start:") for event in events)
+
+    @pytest.mark.parametrize("rollout_save_fails", [False, True])
+    async def test_rollout_state_precedes_model_checkpoint_publication(self, monkeypatch, rollout_save_fails):
+        events = []
+        args = _make_args(start_rollout_id=24, num_rollout=25, save_interval=5)
+        components = _install_driver_fakes(monkeypatch, args, events)
+        if rollout_save_fails:
+
+            async def fail_save(*args, **kwargs):
+                raise OSError("rollout save failed")
+
+            monkeypatch.setattr(components.rollout_executor, "save", fail_save)
+            with pytest.raises(OSError, match="rollout save failed"):
+                await with_disposer(train_async_driver.train, args)
+            assert components.actor_model.saved == []
+        else:
+            await with_disposer(train_async_driver.train, args)
+            assert events.index("executor_save:24") < events.index("actor_save:24")
