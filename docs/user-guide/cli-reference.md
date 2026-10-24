@@ -229,6 +229,10 @@ Sections mirror the launch-script argument groups.
 | `--recompute-granularity` | enum | Megatron default | `full` or `selective`. |
 | `--recompute-method` | enum | Megatron default | `uniform` or `block`. |
 | `--recompute-num-layers` | int | Megatron default | Recompute chunk size. |
+| `--recompute-loss-function` | flag | off | Replay the loss in backward instead of keeping its activations. |
+| `--log-probs-backend` | enum | `torch` | `torch`, `fused`, or `fused_lm_head` (Megatron policy/SFT losses; never holds a microbatch of logits). Normalization and limits in `--help`. |
+| `--log-probs-chunk-size` | int | `-1` | Torch-backend chunk; with `fused_lm_head`, required: scored rows per LM-head tile (start at 4096). |
+| `--lm-head-logits-dtype` | enum | `model` | `fused_lm_head` only: `fp32` accumulates and returns each logits tile in fp32 from bf16 weights. |
 | `--gradient-checkpointing` | flag | off | FSDP equivalent of recompute flags. |
 | `--fsdp-cpu-offload` | flag | off | FSDP: offload params, grads, optimizer state to CPU. |
 | `--fsdp-cpu-backend` | str | `gloo` | FSDP: CPU backend for hybrid offload. |
