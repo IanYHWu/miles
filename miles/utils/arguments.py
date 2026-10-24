@@ -35,7 +35,7 @@ from miles.utils.function_registry import load_function
 from miles.utils.hf_utils.config import is_dsa, load_hf_config
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.lora.arguments import add_lora_arguments, validate_lora_args, validate_lora_args_after_megatron
-from miles.utils.lora.utils import is_lora_enabled
+from miles.utils.lora.utils import is_lora_enabled, is_multi_lora_enabled
 from miles.utils.megatron_args_utils import compute_megatron_world_size_except_dp
 from miles.utils.object_store import ObjectStoreBackend
 from miles.utils.object_store_config import (
@@ -602,23 +602,48 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Whether to enable recompute loss function to save memory during training.",
             )
             parser.add_argument(
-                "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
+                "--log-probs-chunk-size",
+                type=int,
+                default=-1,
+                help=(
+                    "Chunk size to compute log probs to save memory. With --log-probs-backend fused_lm_head "
+                    "it is required and is the number of scored rows projected per LM-head tile."
+                ),
             )
             parser.add_argument(
                 "--log-probs-backend",
                 type=str,
-                choices=["torch", "fused"],
+                choices=["torch", "fused", "fused_lm_head"],
                 default="torch",
                 help=(
                     "How per-token log-probs and entropy are computed from the logits. 'torch' upcasts each "
                     "response chunk to fp32 and keeps its softmax for backward. 'fused' streams the logits "
                     "through Triton kernels and writes the gradient in place; --log-probs-chunk-size does "
-                    "not apply to it. Not only an implementation choice: 'fused' normalizes over the true "
+                    "not apply to it. 'fused_lm_head' (Megatron, --loss-type policy_loss or sft_loss) never "
+                    "holds a microbatch of logits: the model returns its final hidden states and only the "
+                    "scored rows are projected, --log-probs-chunk-size rows at a time, through the 'fused' "
+                    "op; under gradients each tile is recomputed in the backward, and --enable-mtp-training's "
+                    "MTP loss goes through the same tiles. Not only an implementation "
+                    "choice: 'fused' and 'fused_lm_head' normalize over the true "
                     "vocabulary (--vocab-size), as the rollout engine does, while 'torch' normalizes over "
                     "Megatron's padded vocabulary (except for --loss-type score_centering), so with vocab "
                     "padding (TP > 1) the two give slightly different log-probs, ratios and KL. "
-                    "'fused' does not support --true-on-policy-mode or sampling-support replay "
-                    "(--rollout-top-p below 1 or a positive --rollout-top-k)."
+                    "'fused' and 'fused_lm_head' do not support --true-on-policy-mode or sampling-support "
+                    "replay (--rollout-top-p below 1 or a positive --rollout-top-k)."
+                ),
+            )
+            parser.add_argument(
+                "--lm-head-logits-dtype",
+                type=str,
+                choices=["model", "fp32"],
+                default="model",
+                help=(
+                    "Precision of the LM-head projection under --log-probs-backend fused_lm_head. 'model' "
+                    "returns the logits in the model dtype, as the output layer does. 'fp32' keeps the bf16 "
+                    "weight and hidden states but accumulates and returns each logits tile in fp32, so the "
+                    "log-softmax reads unrounded logits; its backward rounds the logits gradient to bf16 once. "
+                    "It applies to the MTP loss's projection too. "
+                    "The rollout engine's head is configured separately (--sglang-enable-fp32-lm-head)."
                 ),
             )
             parser.add_argument(
@@ -3340,25 +3365,59 @@ def _resolve_run_uuid(args: argparse.Namespace) -> str:
 
 def validate_log_probs_backend_args(args) -> None:
     """Reject settings the fused log-prob op does not cover, at startup rather than mid-run."""
-    if args.log_probs_backend != "fused":
+    backend = args.log_probs_backend
+    if args.lm_head_logits_dtype != "model" and backend != "fused_lm_head":
+        raise ValueError(
+            f"--lm-head-logits-dtype {args.lm_head_logits_dtype} only applies to --log-probs-backend fused_lm_head, "
+            f"not {backend}"
+        )
+    if backend not in ("fused", "fused_lm_head"):
         return
     if args.true_on_policy_mode:
         raise ValueError(
-            "--log-probs-backend fused does not support --true-on-policy-mode, which needs bitwise "
+            f"--log-probs-backend {backend} does not support --true-on-policy-mode, which needs bitwise "
             "parity with the rollout engine's own log-softmax; use --log-probs-backend torch."
         )
     if args.use_sampling_support_replay:
         raise ValueError(
-            "--log-probs-backend fused does not support sampling-support replay "
+            f"--log-probs-backend {backend} does not support sampling-support replay "
             f"(--rollout-top-p {args.rollout_top_p}, --rollout-top-k {args.rollout_top_k}); "
             "use --log-probs-backend torch."
         )
     # unset, the actor falls back to the tokenizer's vocab_size, which can leave out added special tokens
     if args.train_backend == "megatron" and args.vocab_size is None:
         raise ValueError(
-            "--log-probs-backend fused needs --vocab-size (the HF config's vocab_size) on the megatron "
+            f"--log-probs-backend {backend} needs --vocab-size (the HF config's vocab_size) on the megatron "
             "backend, to exclude Megatron's vocabulary padding from the softmax."
         )
+    if backend == "fused_lm_head":
+        _validate_fused_lm_head_args(args)
+
+
+def _validate_fused_lm_head_args(args) -> None:
+    """``fused_lm_head`` covers the Megatron policy and SFT losses on the layouts its tests exercise."""
+    if args.train_backend != "megatron":
+        raise ValueError(f"--log-probs-backend fused_lm_head needs --train-backend megatron, not {args.train_backend}")
+    if args.loss_type not in ("policy_loss", "sft_loss"):
+        raise ValueError(
+            f"--log-probs-backend fused_lm_head scores --loss-type policy_loss or sft_loss, not {args.loss_type}"
+        )
+    if args.log_probs_chunk_size <= 0:
+        raise ValueError(
+            "--log-probs-backend fused_lm_head needs a positive --log-probs-chunk-size, the scored rows "
+            f"projected per tile (4096 is a starting point), got {args.log_probs_chunk_size}"
+        )
+    unsupported = {
+        "--allgather-cp": args.allgather_cp,
+        # its combined 1F1B schedule: Miles builds that forward without the LM-head hook, and it is untested
+        "--overlap-moe-expert-parallel-comm": args.overlap_moe_expert_parallel_comm,
+        "LoRA": is_lora_enabled(args) or is_multi_lora_enabled(args),
+        "--advantage-estimator gspo": args.advantage_estimator == "gspo",
+        "--use-opsm": args.use_opsm,
+        "--use-opd": args.use_opd,
+    }
+    if names := [name for name, enabled in unsupported.items() if enabled]:
+        raise ValueError(f"--log-probs-backend fused_lm_head does not support {', '.join(names)}")
 
 
 def _resolve_event_logging(args: argparse.Namespace) -> None:

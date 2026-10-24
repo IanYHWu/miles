@@ -1,11 +1,15 @@
+import dataclasses
 from argparse import Namespace
+from collections.abc import Callable
+
 import torch
 from torch.utils.checkpoint import checkpoint
 
 from miles.backends.training_utils.data.context_parallel import get_local_response_loss_masks, get_sum_of_sample_mean
 from miles.backends.training_utils.loss.hub.advantages import compute_advantages, normalize_advantages
+from miles.backends.training_utils.loss.hub.lm_head import LMHeadInputs, zero_loss_anchor
 from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy, get_values  # noqa: F401
-from miles.backends.training_utils.loss.hub.losses import get_loss_function
+from miles.backends.training_utils.loss.hub.losses import LossFunction, get_loss_function
 from miles.backends.training_utils.loss.hub.math_utils import compute_approx_kl
 from miles.backends.training_utils.loss.hub.opd import apply_opd_kl_to_advantages
 from miles.backends.training_utils.parallel import get_parallel_state
@@ -134,7 +138,7 @@ def loss_function(
     args: Namespace,
     batch: RolloutBatch,
     num_microbatches: int,
-    logits: torch.Tensor,
+    logits: torch.Tensor | LMHeadInputs,
     apply_megatron_loss_scaling: bool = False,
     num_rollouts: int | None = None,
     num_step_tokens: torch.Tensor | None = None,
@@ -153,7 +157,8 @@ def loss_function(
         batch: Mini-batch with "loss_masks", "response_lengths", and other
             keys required by the selected loss function.
         num_microbatches: Number of gradient accumulation steps.
-        logits: Model outputs (policy or value head).
+        logits: Model outputs (policy or value head), or the `LMHeadInputs` of a
+            `--log-probs-backend fused_lm_head` forward.
         num_rollouts: This step's rollout count (total across DP), used as
             the loss normalizer; None falls back to the legacy batch/args value.
         num_step_tokens: This step's `count_loss_tokens` (total across DP), the
@@ -187,20 +192,13 @@ def loss_function(
     # (see get_log_probs_and_entropy); nothing may read them after it
 
     if args.recompute_loss_function:
-        loss, log = checkpoint(
-            func,
-            args,
-            batch,
-            logits,
-            sum_of_sample_mean,
-        )
+        loss, log = _recompute_loss(func, args, batch, logits, sum_of_sample_mean)
     else:
         loss, log = func(args, batch, logits, sum_of_sample_mean)
 
     # Forces autograd to traverse the full graph on every rank to avoid hang.
-    # fp32 sum: an fp16 logits sum can overflow to inf, and 0 * inf is nan.
     if parallel_state.cp.size > 1 and args.allgather_cp:
-        loss = loss + 0 * logits.sum(dtype=torch.float32)
+        loss = loss + zero_loss_anchor(logits)
 
     # Here we need to divide by cp_size because to cancel the multiply in Megatron.
     if num_rollouts is not None:
@@ -241,6 +239,24 @@ def loss_function(
             ),
         },
     )
+
+
+def _recompute_loss(
+    func: LossFunction,
+    args: Namespace,
+    batch: RolloutBatch,
+    logits: torch.Tensor | LMHeadInputs,
+    sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
+) -> tuple[torch.Tensor, dict]:
+    """``func`` under a checkpoint that keeps nothing of the loss for backward and replays it there."""
+    if not isinstance(logits, LMHeadInputs):
+        return checkpoint(func, args, batch, logits, sum_of_sample_mean)
+
+    # this reentrant checkpoint sends gradients only to tensor arguments, so the hidden states go in as one
+    def loss_of_hidden_states(hidden_states: torch.Tensor) -> tuple[torch.Tensor, dict]:
+        return func(args, batch, dataclasses.replace(logits, hidden_states=hidden_states), sum_of_sample_mean)
+
+    return checkpoint(loss_of_hidden_states, logits.hidden_states, use_reentrant=True)
 
 
 def log_train_advantage_computation_event(rollout_data: RolloutBatch) -> None:

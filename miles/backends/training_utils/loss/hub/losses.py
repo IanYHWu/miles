@@ -11,6 +11,7 @@ from miles.backends.training_utils.data.context_parallel import (
 )
 from miles.backends.training_utils.data.sampling_mask import get_rollout_sampling_masks
 from miles.backends.training_utils.loss.hub.corrections import vanilla_tis_function
+from miles.backends.training_utils.loss.hub.lm_head import LMHeadInputs, zero_loss_anchor
 from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy, get_values
 from miles.backends.training_utils.loss.hub.math_utils import (
     compute_approx_kl,
@@ -33,7 +34,7 @@ class LossFunction(Protocol):
         self,
         args: Namespace,
         batch: RolloutBatch,
-        logits: torch.Tensor,
+        logits: torch.Tensor | LMHeadInputs,
         sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute a scalar loss with gradient + a dict of detached scalar metrics.
@@ -47,7 +48,9 @@ class LossFunction(Protocol):
                 qkv_format="bshd"). Per-implementation docstrings list extras.
             logits: Float32. Last dim is vocab_size (policy/sft) or 1 (value).
                 Outer shape is `[1, T, ...]` for qkv_format="thd" (T = sum of
-                total_lengths) or `[B, max_seq_len, ...]` for "bshd".
+                total_lengths) or `[B, max_seq_len, ...]` for "bshd". Under
+                `--log-probs-backend fused_lm_head` the policy and SFT losses get
+                the forward's `LMHeadInputs` instead.
             sum_of_sample_mean: CP-aware reducer; takes a flat per-token tensor
                 and returns a scalar, sample-mean-weighted by `loss_masks`.
 
@@ -65,7 +68,7 @@ class LossFunction(Protocol):
 def policy_loss_function(
     args: Namespace,
     batch: RolloutBatch,
-    logits: torch.Tensor,
+    logits: torch.Tensor | LMHeadInputs,
     sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute policy loss (PPO/GSPO/CISPO) and metrics.
@@ -82,7 +85,7 @@ def policy_loss_function(
         batch: Mini-batch containing "advantages", "log_probs" (old policy),
             "unconcat_tokens", "response_lengths", "total_lengths", "loss_masks",
             and optionally "ref_log_probs" and "rollout_log_probs".
-        logits: Policy logits with shape `[1, T, V]`.
+        logits: Policy logits with shape `[1, T, V]`, or `LMHeadInputs`.
         sum_of_sample_mean: Reduction function that averages per-sample values.
 
     Returns:
@@ -346,9 +349,9 @@ def policy_loss_function(
         if args.kl_loss_coef != 0:
             loss = loss + args.kl_loss_coef * kl_loss
 
-    # make sure the gradient could backprop correctly; fp32 sum avoids fp16 inf -> nan
+    # make sure the gradient could backprop correctly
     if log_probs.numel() == 0:
-        loss += 0 * logits.sum(dtype=torch.float32)
+        loss += zero_loss_anchor(logits)
 
     train_rollout_logprob_abs_diff = None
     train_rollout_kl = None
@@ -474,7 +477,7 @@ def value_loss_function(
 def sft_loss_function(
     args: Namespace,
     batch: RolloutBatch,
-    logits: torch.Tensor,
+    logits: torch.Tensor | LMHeadInputs,
     sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute supervised fine-tuning loss over response tokens.
@@ -486,7 +489,7 @@ def sft_loss_function(
         args: Configuration (passed through to helpers).
         batch: Mini-batch with "unconcat_tokens", "response_lengths", and
             "total_lengths".
-        logits: Policy logits with shape `[1, T, V]`.
+        logits: Policy logits with shape `[1, T, V]`, or `LMHeadInputs`.
         sum_of_sample_mean: Reduction function that averages per-sample values.
 
     Returns:
@@ -510,9 +513,9 @@ def sft_loss_function(
     log_probs = torch.cat(log_probs, dim=0)
     loss = -sum_of_sample_mean(log_probs)
 
-    # make sure the gradient could backprop correctly; fp32 sum avoids fp16 inf -> nan
+    # make sure the gradient could backprop correctly
     if log_probs.numel() == 0:
-        loss += 0 * logits.sum(dtype=torch.float32)
+        loss += zero_loss_anchor(logits)
 
     return (
         loss,

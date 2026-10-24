@@ -1124,14 +1124,91 @@ def test_sampling_support_arguments_fail_closed(extra, message):
     ],
     ids=["true_on_policy", "sampling_support_replay", "no_vocab_size"],
 )
-def test_fused_log_probs_backend_rejects_what_it_does_not_cover(extra, vocab_size, message):
-    parser = argparse.ArgumentParser()
-    get_miles_extra_args_provider()(parser)
-    args = parser.parse_args(["--log-probs-backend", "fused", "--num-rollout", "1"] + extra + REQUIRED_ARGS)
-    args.vocab_size = vocab_size  # a Megatron flag, absent from this parser
-    args.use_sampling_support_replay = "--rollout-top-k" in extra  # derived by miles_validate_args
+@pytest.mark.parametrize("backend", ["fused", "fused_lm_head"])
+def test_fused_log_probs_backend_rejects_what_it_does_not_cover(extra, vocab_size, message, backend):
+    args = _log_probs_backend_args(["--log-probs-backend", backend, "--log-probs-chunk-size", "4096"] + extra)
+    args.vocab_size = vocab_size
 
     with pytest.raises(ValueError, match=message):
+        validate_log_probs_backend_args(args)
+
+
+def _log_probs_backend_args(extra: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(["--num-rollout", "1"] + extra + REQUIRED_ARGS)
+    args.vocab_size = 248_320  # a Megatron flag, absent from this parser
+    args.use_sampling_support_replay = "--rollout-top-k" in extra  # derived by miles_validate_args
+    args.overlap_moe_expert_parallel_comm = False  # a Megatron flag, absent from this parser
+    return args
+
+
+@pytest.mark.parametrize("loss_type", ["policy_loss", "sft_loss"])
+@pytest.mark.parametrize("logits_dtype", ["model", "fp32"])
+@pytest.mark.parametrize("mtp", [[], ["--enable-mtp-training"]], ids=["no_mtp", "mtp"])
+def test_fused_lm_head_backend_accepts_the_policy_and_sft_losses(loss_type, logits_dtype, mtp):
+    args = _log_probs_backend_args(
+        ["--log-probs-backend", "fused_lm_head", "--log-probs-chunk-size", "4096", "--loss-type", loss_type]
+        + ["--lm-head-logits-dtype", logits_dtype]
+        + mtp
+    )
+
+    validate_log_probs_backend_args(args)
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--train-backend", "fsdp"], "needs --train-backend megatron"),
+        (["--loss-type", "score_centering"], "scores --loss-type policy_loss or sft_loss"),
+        (["--loss-type", "custom_loss"], "scores --loss-type policy_loss or sft_loss"),
+        (["--log-probs-chunk-size", "-1"], "needs a positive --log-probs-chunk-size"),
+        (["--log-probs-chunk-size", "0"], "needs a positive --log-probs-chunk-size"),
+        (["--allgather-cp"], "does not support --allgather-cp"),
+        (["--advantage-estimator", "gspo"], "does not support --advantage-estimator gspo"),
+        (["--use-opsm"], "does not support --use-opsm"),
+        (["--use-opd"], "does not support --use-opd"),
+    ],
+    ids=[
+        "fsdp",
+        "score_centering",
+        "custom_loss",
+        "unset_tile",
+        "zero_tile",
+        "allgather_cp",
+        "gspo",
+        "opsm",
+        "opd",
+    ],
+)
+def test_fused_lm_head_backend_rejects_what_it_does_not_cover(extra, message):
+    args = _log_probs_backend_args(["--log-probs-backend", "fused_lm_head", "--log-probs-chunk-size", "4096"] + extra)
+
+    with pytest.raises(ValueError, match=message):
+        validate_log_probs_backend_args(args)
+
+
+def test_fused_lm_head_backend_rejects_the_moe_comm_overlap_schedule():
+    args = _log_probs_backend_args(["--log-probs-backend", "fused_lm_head", "--log-probs-chunk-size", "4096"])
+    args.overlap_moe_expert_parallel_comm = True
+
+    with pytest.raises(ValueError, match="does not support --overlap-moe-expert-parallel-comm"):
+        validate_log_probs_backend_args(args)
+
+
+def test_fused_lm_head_backend_rejects_lora():
+    args = _log_probs_backend_args(["--log-probs-backend", "fused_lm_head", "--log-probs-chunk-size", "4096"])
+    args.lora_rank = 8
+
+    with pytest.raises(ValueError, match="does not support LoRA"):
+        validate_log_probs_backend_args(args)
+
+
+@pytest.mark.parametrize("backend", ["torch", "fused"])
+def test_fp32_lm_head_logits_need_the_fused_lm_head_backend(backend):
+    args = _log_probs_backend_args(["--log-probs-backend", backend, "--lm-head-logits-dtype", "fp32"])
+
+    with pytest.raises(ValueError, match="only applies to --log-probs-backend fused_lm_head"):
         validate_log_probs_backend_args(args)
 
 

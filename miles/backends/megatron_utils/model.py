@@ -31,6 +31,7 @@ from miles.backends.megatron_utils.lora.native import wrap_model_provider_with_l
 from miles.backends.megatron_utils.optimizer_state_reset import reset_optimizer_states
 from miles.backends.training_utils.data.rollout import DataIterator, get_batch
 from miles.backends.training_utils.data.sampling_mask import get_rollout_sampling_masks
+from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy
 from miles.backends.training_utils.loss.objective import loss_function
 from miles.backends.training_utils.metrics.checks import check_grad_norm, check_kl
 from miles.backends.training_utils.metrics.log_utils import (
@@ -64,6 +65,7 @@ from .ci_utils import (
     save_model_hashes,
 )
 from .initialize import is_first_replica_megatron_main_rank
+from .lm_head import LM_HEAD_LOSS_TYPES, lm_head_capture, setup_lm_head
 from .lora.utils import (
     is_lora_enabled,
     is_lora_model,
@@ -178,6 +180,8 @@ def setup_model_and_optimizer(
         model = get_model(provider_func, ModelType.encoder_or_decoder)
     for model_chunk in model:
         model_chunk.lora_attached = lora_attached
+    if role == "actor":
+        setup_lm_head(args, model)
 
     if args.debug_disable_optimizer:
         if is_first_replica_megatron_main_rank():
@@ -354,17 +358,22 @@ def forward_only(
 
             set_tokens_per_adapter_slot(model, batch["adapter_token_counts"])
 
-        output_tensor = model(
-            input_ids=tokens,
-            position_ids=None,
-            attention_mask=None,
-            labels=None,
-            packed_seq_params=packed_seq_params,
-            loss_mask=batch["input_loss_masks"],
-            **(filter_keys(batch, ["witness_ids"]) if args.enable_witness else {}),
-            **(batch["multimodal_train_inputs"] if batch["multimodal_train_inputs"] is not None else {}),
-            fp32_output=fp32_output,
-        )
+        lm_head = lm_head_capture(args, scores_log_probs=f is get_log_probs_and_entropy)
+        with lm_head.active() if lm_head is not None else nullcontext():
+            output_tensor = model(
+                input_ids=tokens,
+                position_ids=None,
+                attention_mask=None,
+                labels=None,
+                packed_seq_params=packed_seq_params,
+                loss_mask=batch["input_loss_masks"],
+                **(filter_keys(batch, ["witness_ids"]) if args.enable_witness else {}),
+                **(batch["multimodal_train_inputs"] if batch["multimodal_train_inputs"] is not None else {}),
+                **(lm_head.forward_kwargs() if lm_head is not None else {}),
+                # the LM-head path's output is the hidden states: upcasting them would not make fp32 logits,
+                # it would break the head's bf16 projection; --lm-head-logits-dtype owns the logits precision
+                fp32_output=fp32_output and lm_head is None,
+            )
 
         callback_kwargs = dict(
             args=args,
@@ -377,7 +386,8 @@ def forward_only(
         if use_rollout_sampling_mask:
             callback_kwargs["rollout_sampling_mask"] = rollout_sampling_mask
 
-        return output_tensor, partial(f, **callback_kwargs)
+        callback = partial(f, **callback_kwargs)
+        return output_tensor, lm_head.bind(callback) if lm_head is not None else callback
 
     # Turn on evaluation mode which disables dropout.
     for model_module in model:
@@ -501,7 +511,9 @@ def run_forward_backward_pass(
         for m in all_replay_managers:
             m.stage = "replay_forward"
 
+        lm_head = lm_head_capture(args, scores_log_probs=args.loss_type in LM_HEAD_LOSS_TYPES)
         if return_schedule_plan:
+            assert lm_head is None, "--log-probs-backend fused_lm_head does not support combined 1f1b"
             assert not args.enable_mtp_training, "MTP training should not be enabled when using combined 1f1b"
             assert not args.enable_witness, "Witness is not supported with combined 1f1b (build_schedule_plan)"
             output_tensor = model.build_schedule_plan(
@@ -527,15 +539,18 @@ def run_forward_backward_pass(
 
             if (x := batch["multimodal_train_inputs"]) is not None:
                 forward_kwargs.update(x)
+            if lm_head is not None:
+                forward_kwargs.update(lm_head.forward_kwargs())
 
-            output_tensor = model(
-                **forward_kwargs, fp32_output=args.loss_type not in ("policy_loss", "sft_loss", "score_centering")
-            )
+            with lm_head.active() if lm_head is not None else nullcontext():
+                output_tensor = model(
+                    **forward_kwargs, fp32_output=args.loss_type not in ("policy_loss", "sft_loss", "score_centering")
+                )
 
         for m, old_stage in zip(all_replay_managers, old_stages, strict=True):
             m.stage = old_stage
 
-        return output_tensor, partial(
+        loss_func = partial(
             loss_function,
             args,
             batch,
@@ -543,6 +558,7 @@ def run_forward_backward_pass(
             apply_megatron_loss_scaling=True,
             num_rollouts=num_rollouts,
         )
+        return output_tensor, lm_head.bind(loss_func) if lm_head is not None else loss_func
 
     # Forward pass.
     forward_backward_func = get_forward_backward_func()
