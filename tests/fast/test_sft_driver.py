@@ -437,3 +437,77 @@ def test_custom_data_source_checkpoint_format_is_not_assumed(tmp_path):
     (cursor / "state.pt").rename(cursor / "cursor.json")
     finish_save(tmp_path, 0, state, keep_best=True)
     assert recover_checkpoint(tmp_path)["iteration"] == 0
+
+
+def test_driver_prefetches_next_batch_but_never_across_a_save(tmp_path, monkeypatch):
+    events = []
+
+    class Actor:
+        async def get_train_parallel_config(self):
+            return {}
+
+        async def train(self, iteration, pack):
+            assert pack == f"batch-{iteration}"
+            await asyncio.sleep(0.01)  # let a prefetch run during the update
+            events.append(("train", iteration))
+
+        async def save_model(self, iteration, force_sync):
+            (tmp_path / f"iter_{iteration:07d}" / ".metadata").touch()
+            (tmp_path / "latest_checkpointed_iteration.txt").write_text(str(iteration))
+
+    class Executor:
+        async def get_num_rollout_per_epoch(self):
+            return 100
+
+        async def get(self, iteration):
+            events.append(("get", iteration))
+            return f"batch-{iteration}"
+
+        async def save(self, iteration):
+            events.append(("save", iteration))
+            cursor = tmp_path / "rollout" / str(iteration) / "data_source"
+            cursor.mkdir(parents=True)
+
+    async def create_rollout(args):
+        return None, Executor(), None
+
+    async def create_train(args, executor):
+        args.start_rollout_id = 0
+        return Actor(), None
+
+    async def validate(*args):
+        return 1.0
+
+    monkeypatch.setattr(train_sft, "create_rollout_components", create_rollout)
+    monkeypatch.setattr(train_sft, "create_training_models", create_train)
+    monkeypatch.setattr(train_sft, "_validation_dataset", lambda args: [1])
+    monkeypatch.setattr(train_sft, "_validate", validate)
+    monkeypatch.setattr(train_sft, "init_orchestration_script", lambda *a, **kw: None)
+    monkeypatch.setattr(train_sft, "remove_train_output_refs", lambda *a: None)
+    monkeypatch.setattr(train_sft, "remove_rollout_data_refs", lambda *a: None)
+    monkeypatch.setattr(train_sft.tracking, "log", lambda *a, **kw: None)
+    args = _args(
+        save=str(tmp_path),
+        requested_load=str(tmp_path),
+        num_rollout=5,
+        sft_eval_interval=3,
+        save_interval=3,
+        sft_keep_best=False,
+        load=str(tmp_path),
+        no_load_optim=False,
+        no_load_rng=False,
+        finetune=False,
+        megatron_to_hf_mode="bridge",
+        hf_checkpoint="hf-initializer",
+        ref_load=None,
+        debug_exit_after_rollout=None,
+    )
+    asyncio.run(train_sft._train(args, disposer=SimpleNamespace(add=lambda *a: None)))
+    assert [e for e in events if e[0] == "train"] == [("train", i) for i in range(5)]
+    for index in range(1, 5):
+        fetched = events.index(("get", index))
+        if index == 3:  # step 3 ends in a save: fetch only after that save commits
+            assert fetched > events.index(("save", 2))
+        else:  # rendered while the previous update trains
+            assert fetched < events.index(("train", index - 1))
+    assert ("get", 5) not in events

@@ -192,9 +192,25 @@ async def _train(args, *, disposer: Disposer):
         raise ValueError("Training dataset must contain at least one global batch")
     if args.start_rollout_id == 0:
         await _validate(args, actor, parallel, dataset, render, 0)
+    async def fetch(index):
+        return await executor.get(index)
+
+    def ends_with_save(step):
+        early_exit = bool(
+            args.debug_exit_after_rollout and step - args.start_rollout_id >= args.debug_exit_after_rollout
+        )
+        final = step == args.num_rollout or early_exit
+        validate = step % args.sft_eval_interval == 0 or step % epoch_steps == 0 or final
+        return validate or step % args.save_interval == 0
+
+    prefetched = None
     for iteration in range(args.start_rollout_id, args.num_rollout):
-        # No prefetch across a save: cursor and weights refer to the same batch.
-        pack = await executor.get(iteration)
+        pack = await (prefetched if prefetched is not None else fetch(iteration))
+        prefetched = None
+        # Render the next batch during this update, but never across a save:
+        # the saved data cursor and weights must refer to the same batch.
+        if not ends_with_save(iteration + 1):
+            prefetched = asyncio.ensure_future(fetch(iteration + 1))
         try:
             output = await actor.train(iteration, pack)
             remove_train_output_refs(output)
