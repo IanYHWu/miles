@@ -92,10 +92,36 @@ async def _run_and_stop_job(address: str, submission_id: str, entrypoint: str, r
             signal.signal(sig, handler)
 
 
-async def _follow_job(client: JobSubmissionClient, submission_id: str, stop_requested: asyncio.Event) -> None:
+async def _follow_job(
+    client: JobSubmissionClient,
+    submission_id: str,
+    stop_requested: asyncio.Event,
+    reattach_delay_s: float = 5.0,
+) -> None:
     async def print_logs():
-        async for chunk in client.tail_job_logs(submission_id):
-            print(chunk, end="", flush=True)
+        # The dashboard's log stream can end or drop while the job keeps running (seen after
+        # ~27 h). Ending the follow would stop a healthy launcher-owned job, so reattach until
+        # the job is terminal. Each tail replays the log file from its start: skip what was
+        # already printed.
+        printed = 0
+        while True:
+            skip = printed
+            try:
+                async for chunk in client.tail_job_logs(submission_id):
+                    if skip:
+                        if len(chunk) <= skip:
+                            skip -= len(chunk)
+                            continue
+                        chunk, skip = chunk[skip:], 0
+                    print(chunk, end="", flush=True)
+                    printed += len(chunk)
+            except Exception as error:  # a dropped stream is not a job failure
+                print(f"\n[ray_job] log stream error: {error!r}", flush=True)
+            status = client.get_job_status(submission_id)
+            if status.is_terminal():
+                return
+            print(f"\n[ray_job] log stream ended while job {submission_id} is {status}; reattaching", flush=True)
+            await asyncio.sleep(reattach_delay_s)
 
     logs_task = asyncio.create_task(print_logs())
     stop_task = asyncio.create_task(stop_requested.wait())
