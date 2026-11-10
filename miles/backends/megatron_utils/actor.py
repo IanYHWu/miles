@@ -852,7 +852,12 @@ class MegatronTrainRayActor(TrainRayActor):
             snapshot_publisher=self.snapshot_publisher,
         )
 
-        if self.args.save_hf is not None and self.role == "actor":
+        hf_interval = getattr(self.args, "save_hf_interval", None)
+        if (
+            self.args.save_hf is not None
+            and self.role == "actor"
+            and (not hf_interval or (rollout_id + 1) % hf_interval == 0)
+        ):
             assert self.snapshot_publisher is not None, "HF export requires a snapshot publisher"
             save_hf_model(self.args, rollout_id, self.model, publisher=self.snapshot_publisher)
 

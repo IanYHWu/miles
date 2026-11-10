@@ -1628,6 +1628,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--save-hf-interval",
+                type=int,
+                default=None,
+                help=(
+                    "With --save-hf, export the HF model only at checkpoint saves where the number "
+                    "of completed optimizer steps (rollout_id + 1) is a multiple of this value. "
+                    "None (default) exports at every checkpoint save."
+                ),
+            )
+            parser.add_argument(
                 "--save-trigger-sentinel",
                 type=str,
                 default=None,
