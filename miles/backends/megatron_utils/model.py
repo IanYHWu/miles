@@ -237,6 +237,9 @@ def setup_model_and_optimizer(
 
         setup_optimizer_state_streaming(args, optimizer)
 
+    if args.entry == "serve":
+        # a Tinker client sends each optimizer step its own AdamParams; no schedule drives them
+        return model, optimizer, None
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
     return model, optimizer, opt_param_scheduler
 

@@ -1,10 +1,14 @@
 """Runtime translation preserves datum order, sampling parameters, and token logprobs."""
 
+import json
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from miles.tinker.core.types import UserInputError
 from miles.tinker.runtime import (
+    FullFinetuneBackend,
     MilesBackend,
     _build_train_data,
     _pad_to_dp_multiple,
@@ -23,7 +27,7 @@ def _datum(tokens: list[int], **extra) -> dict:
 
 class TestBuildTrainData:
     def test_datums_become_rollout_batch_keys(self):
-        train_data = _build_train_data([(3, _datum([1, 2, 3])), (5, _datum([4, 5]))])
+        train_data = _build_train_data([(3, _datum([1, 2, 3])), (5, _datum([4, 5]))], with_adapter_slots=True)
         assert train_data["tokens"] == [[1, 2, 3], [4, 5]]
         assert train_data["target_tokens"] == [[2, 3], [5]]
         assert train_data["response_lengths"] == [2, 1]
@@ -35,11 +39,16 @@ class TestBuildTrainData:
 
     def test_optional_datum_keys_map_to_batch_names(self):
         train_data = _build_train_data(
-            [(0, _datum([1, 2], weights=[1.0], advantages=[2.0], sampling_logprobs=[-0.5]))]
+            [(0, _datum([1, 2], weights=[1.0], advantages=[2.0], sampling_logprobs=[-0.5]))], with_adapter_slots=True
         )
         assert train_data["loss_weights"] == [[1.0]]
         assert train_data["advantages"] == [[2.0]]
         assert train_data["rollout_log_probs"] == [[-0.5]]
+
+    def test_a_full_finetune_batch_names_no_adapter_slots(self):
+        train_data = _build_train_data([(0, _datum([1, 2, 3]))], with_adapter_slots=False)
+        assert "adapter_slots" not in train_data
+        assert train_data["tokens"] == [[1, 2, 3]]
 
 
 async def test_forward_backward_merges_worker_replicas():
@@ -199,3 +208,80 @@ def test_an_aborted_sample_fails_instead_of_passing_as_a_stop():
     """A truncated sequence fed to RL as a completed sample corrupts training data silently."""
     response = {"meta_info": {"output_token_logprobs": [(-0.1, 11)], "finish_reason": {"type": "abort"}}}
     assert "abort" in _to_sequence(response)["error"]
+
+
+class _FakeInferenceController:
+    def __init__(self, events: list) -> None:
+        self.events = events
+        self.info = SimpleNamespace(snapshot_cell_id_to_hashes={"cell-0": "hash"})
+
+    async def start_update_weights(self, model_id=None):
+        self.events.append("start")
+        return self.info
+
+    async def abort_update_weights(self):
+        self.events.append("abort")
+
+    async def end_update_weights(self, snapshot_cell_id_to_hashes):
+        self.events.append(("end", snapshot_cell_id_to_hashes))
+
+
+class _FakeTrainer:
+    def __init__(self, events: list, error: Exception | None = None) -> None:
+        self.events = events
+        self.error = error
+
+    async def update_weights(self, info, rollout_id=None):
+        self.events.append(("update_weights", info))
+        if self.error is not None:
+            raise self.error
+
+
+async def test_a_full_finetune_sampler_save_pushes_the_weights_and_records_only_metadata(tmp_path):
+    events = []
+    controller = _FakeInferenceController(events)
+    backend = FullFinetuneBackend(_FakeTrainer(events), "http://router", controller)
+    path = tmp_path / "sampler_weights" / "1"
+
+    assert await backend.export_slot(0, 0, 0.0, str(path), metadata={"train_mode": "full"}) is None
+
+    assert events == ["start", ("update_weights", controller.info), ("end", {"cell-0": "hash"})]
+    assert [entry.name for entry in path.iterdir()] == ["META.json"]
+    assert json.loads((path / "META.json").read_text()) == {"train_mode": "full"}
+
+
+async def test_a_failed_weight_push_releases_the_engines_and_records_nothing(tmp_path):
+    events = []
+    backend = FullFinetuneBackend(
+        _FakeTrainer(events, error=RuntimeError("push failed")), "http://router", _FakeInferenceController(events)
+    )
+    path = tmp_path / "sampler_weights" / "1"
+
+    with pytest.raises(RuntimeError, match="push failed"):
+        await backend.export_slot(0, 0, 0.0, str(path), metadata={"train_mode": "full"})
+
+    assert events[-1] == "abort"
+    assert not path.exists()
+
+
+async def test_full_finetune_sampling_names_no_adapter(monkeypatch):
+    requests = []
+
+    async def fake_post(url, request):
+        requests.append(request)
+        return {"meta_info": {"output_token_logprobs": [(-0.1, 7)], "finish_reason": {"type": "stop"}}}
+
+    monkeypatch.setattr("miles.tinker.runtime.post", fake_post)
+    backend = FullFinetuneBackend(None, "http://router", None)
+    payload = {
+        "prompt_tokens": [1, 2],
+        "sampling_params": {"max_tokens": 4},
+        "num_samples": 1,
+        "prompt_logprobs": False,
+        "topk_prompt_logprobs": 0,
+    }
+
+    result = await backend.sample(payload, "model-1@1", "/checkpoints/model-1/sampler_weights/1")
+
+    assert result["sequences"][0]["tokens"] == [7]
+    assert "lora_path" not in requests[0] and "lora_backfill_paths" not in requests[0]

@@ -51,6 +51,9 @@ class GatewayConfig:
     n_slots: int
     checkpoint_root: str
     vocab_size: int
+    # "lora": each model trains an adapter slot; "full": one model at a time trains the served weights, and
+    # the engines serve only the latest sampler save
+    train_mode: str = "lora"
     max_datums_per_request: int = 1024
     max_tokens_per_datum: int = 32768
     max_tokens_per_request: int = 4_000_000

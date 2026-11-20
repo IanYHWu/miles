@@ -66,6 +66,7 @@ class TestSetupModelAndOptimizerLoraBranch:
 
     def _make_args(self, lora_rank=32, role="actor", mode="bridge"):
         return Namespace(
+            entry="train",
             lora_rank=lora_rank,
             lora_adapter_path=None,
             custom_model_provider_path=None,
@@ -172,6 +173,25 @@ class TestSetupModelAndOptimizerLoraBranch:
         mock_lora_setup.assert_not_called()
         mock_wrap.assert_called_once_with(mock_provider.return_value, args)
         assert mock_get_model.call_args.args[0] is mock_wrap.return_value
+
+    @patch(f"{_MODEL_MODULE}.get_optimizer_param_scheduler")
+    @patch(f"{_MODEL_MODULE}.get_megatron_optimizer")
+    @patch(f"{_MODEL_MODULE}.get_model")
+    @patch(f"{_MODEL_MODULE}.get_model_provider_func")
+    def test_a_tinker_gateway_builds_the_optimizer_but_no_lr_schedule(
+        self, mock_provider, mock_get_model, mock_opt, mock_sched
+    ):
+        """A full fine-tuning gateway steps under each request's AdamParams and has no rollout count to plan by."""
+        from miles.backends.megatron_utils.model import setup_model_and_optimizer
+
+        mock_get_model.return_value = [MagicMock()]
+        args = self._make_args(lora_rank=0, role="actor", mode="bridge")
+        args.entry = "serve"
+
+        _, optimizer, opt_param_scheduler = setup_model_and_optimizer(args, role="actor")
+
+        assert optimizer is mock_opt.return_value and opt_param_scheduler is None
+        mock_sched.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

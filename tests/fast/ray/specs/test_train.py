@@ -290,6 +290,14 @@ class TestConstructorArguments:
         assert actor_spec.worker_class == actor_class
         assert critic_spec.worker_class == train_specs._TRAINER_ACTOR_CLASSES[backend]
 
+    def test_a_full_finetune_gateway_selects_the_full_finetune_actor(self):
+        actor_spec, critic_spec = specs_trainer(_make_args(tinker_train_mode="full", use_critic=True))
+
+        assert actor_spec.worker_class == (
+            "miles.backends.megatron_utils.full_finetune.actor.FullFinetuneTrainRayActor"
+        )
+        assert critic_spec.worker_class == train_specs._TRAINER_ACTOR_CLASSES["megatron"]
+
 
 class TestConcurrencyGroups:
     def test_the_heartbeat_rpc_is_always_isolated(self):

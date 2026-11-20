@@ -82,7 +82,9 @@ async def test_the_training_conversation(client):
 
     sampler = (
         await client.post(
-            "/api/v1/save_weights_for_sampler", json={"model_id": model_id, "seq_id": 3}, headers=_headers()
+            "/api/v1/save_weights_for_sampler",
+            json={"model_id": model_id, "seq_id": 3, "path": "after-step"},
+            headers=_headers(),
         )
     ).json()
     sampler_path = (await _poll(client, sampler["request_id"]))["path"]

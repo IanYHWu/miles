@@ -1,59 +1,11 @@
-"""Multi-LoRA slot operations extending the shared Megatron model execution."""
+"""Multi-LoRA slot operations; the work-unit pass itself is ``megatron_utils.work_unit``."""
 
 from argparse import Namespace
 from collections.abc import Sequence
 
 from megatron.core.distributed import DistributedDataParallel as DDP
 
-from miles.backends.megatron_utils.lora.optimizer import (
-    SlotOptimizer,
-    reset_grad_metadata_keep_grads,
-    step_slot_optimizers,
-)
-from miles.backends.megatron_utils.model import run_forward_backward_pass, setup_train_iteration_config
-from miles.backends.training_utils.data.rollout import get_data_iterator
-from miles.backends.training_utils.metrics.log_utils import aggregate_train_losses
-from miles.backends.training_utils.parallel import get_parallel_state
-from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
-from miles.utils.types import RolloutBatch
-
-
-def run_forward_backward(
-    args: Namespace,
-    batch_id: int,
-    model: Sequence[DDP],
-    rollout_data: RolloutBatch,
-    *,
-    forward_only: bool = False,
-) -> dict:
-    data_iterator, num_microbatches = get_data_iterator(args, model, rollout_data)
-    assert len(num_microbatches) == 1, "a work unit is a single forward/backward pass"
-
-    for iterator in data_iterator:
-        iterator.reset()
-    for model_chunk in model:
-        model_chunk.train()
-    # disable_optimizer: bf16 loss scaling is the identity, so the pass needs no optimizer
-    setup_train_iteration_config(args, model, None, disable_optimizer=True)
-    if not forward_only:
-        reset_grad_metadata_keep_grads(model)
-
-    dumper_phase_util = DumperMegatronUtil(args, model, DumperPhase.FWD_BWD, rollout_id=batch_id)
-    losses_reduced = run_forward_backward_pass(
-        args,
-        dumper_phase_util,
-        data_iterator,
-        model,
-        num_microbatches[0],
-        num_rollouts=None,
-        forward_only=forward_only,
-    )
-    per_datum_outputs = [output for microbatch in losses_reduced for output in microbatch["per_datum"]]
-    dumper_phase_util.finalize(model)
-
-    if get_parallel_state().is_pp_last_stage:
-        return {"metrics": aggregate_train_losses(losses_reduced, None), "per_datum": per_datum_outputs}
-    return {"metrics": {}, "per_datum": per_datum_outputs}
+from miles.backends.megatron_utils.lora.optimizer import SlotOptimizer, step_slot_optimizers
 
 
 def optim_step(

@@ -4,6 +4,8 @@ import asyncio
 
 import httpx
 
+from miles.backends.training_utils.checkpoint.io import write_checkpoint_dir
+from miles.ray.placement_group import push_weights
 from miles.ray.rollout.train_data_conversion import ROLLOUT_DATA_VALUE_SPEC
 from miles.tinker.core.types import UserInputError
 from miles.utils import object_store
@@ -24,7 +26,7 @@ def _pad_to_dp_multiple(slot_datums: list, dp_size: int) -> list:
     return slot_datums + [(slot, filler)] * (dp_size - remainder)
 
 
-def _build_train_data(slot_datums: list) -> dict:
+def _build_train_data(slot_datums: list, *, with_adapter_slots: bool) -> dict:
     """Miles response_lengths select label positions here, including prompt targets."""
     datums = [datum for _, datum in slot_datums]
     train_data = {
@@ -34,9 +36,10 @@ def _build_train_data(slot_datums: list) -> dict:
         "response_lengths": [datum["target_len"] for datum in datums],
         "total_lengths": [len(datum["tokens"]) for datum in datums],
         "sample_indices": list(range(len(datums))),
-        "adapter_slots": [slot for slot, _ in slot_datums],
         "dynamic_global_batch_size": len(datums),
     }
+    if with_adapter_slots:
+        train_data["adapter_slots"] = [slot for slot, _ in slot_datums]
     for datum_key, batch_key in DATUM_TO_BATCH_KEYS.items():
         if datum_key in datums[0]:
             train_data[batch_key] = [datum[datum_key] for datum in datums]
@@ -44,6 +47,9 @@ def _build_train_data(slot_datums: list) -> dict:
 
 
 class MilesBackend:
+    # the trainer routes each datum to its model's adapter slot
+    with_adapter_slots = True
+
     def __init__(self, trainer, router_url: str, dp_size: int = 1) -> None:
         self.trainer = trainer
         self.router_url = router_url
@@ -75,7 +81,9 @@ class MilesBackend:
     async def _execute_batch(
         self, method: str, batch_id: int, slot_datums: list, loss_fn: str, loss_fn_config: dict
     ) -> list[dict] | dict:
-        train_data = _build_train_data(_pad_to_dp_multiple(slot_datums, self.dp_size))
+        train_data = _build_train_data(
+            _pad_to_dp_multiple(slot_datums, self.dp_size), with_adapter_slots=self.with_adapter_slots
+        )
         train_data["loss_fn"] = loss_fn
         train_data["loss_fn_config"] = loss_fn_config
         worker_results = await self._call_trainer(method, batch_id, train_data)
@@ -171,6 +179,30 @@ class MilesBackend:
                 # request-carried backfill source: the engine refills an evicted version itself
                 request["lora_backfill_paths"] = {lora_name: lora_path}
         return request
+
+
+class FullFinetuneBackend(MilesBackend):
+    """Slot 0 is the served model's own weights; the engines hold one copy of them.
+
+    A sampler save pushes the trained weights to the engines and records only its metadata.
+    """
+
+    with_adapter_slots = False
+
+    def __init__(self, trainer, router_url: str, inference_controller, dp_size: int = 1) -> None:
+        super().__init__(trainer, router_url, dp_size=dp_size)
+        self.inference_controller = inference_controller
+
+    async def export_slot(
+        self, slot: int, rank: int, alpha: float, path: str, metadata: dict | None = None
+    ) -> dict | None:
+        await push_weights(self.trainer, self.inference_controller)
+        write_checkpoint_dir(path, lambda _checkpoint_dir: None, metadata=metadata)
+        return None
+
+    async def sample(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
+        # the service admits only the sampler of the latest push, which names no adapter on the engines
+        return await super().sample(payload, None)
 
 
 def _slot_failure(worker_results: list) -> dict | None:

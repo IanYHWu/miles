@@ -13,7 +13,7 @@ from miles.ray.wiring import get_backend_capability
 from miles.tinker.arguments import add_tinker_arguments, configure_tinker_args
 from miles.tinker.core.service import TinkerService
 from miles.tinker.core.types import GatewayConfig
-from miles.tinker.runtime import MilesBackend
+from miles.tinker.runtime import FullFinetuneBackend, MilesBackend
 from miles.tinker.server.app import build_app
 from miles.utils.arguments import parse_args
 from miles.utils.async_utils import Disposer, with_disposer
@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 
 async def serve(args, *, disposer: Disposer):
-    assert args.multi_lora, "serve_tinker requires --multi-lora-n-adapters > 0"
+    full_finetune = args.tinker_train_mode == "full"
+    assert full_finetune or args.multi_lora, "--tinker-train-mode lora requires --multi-lora-n-adapters > 0"
     assert args.load == args.hf_checkpoint, "Tinker trainers and engines must load the same frozen HF base"
     checkpoint_root = args.tinker_checkpoint_root or (args.save and f"{args.save}/tinker")
     assert checkpoint_root, "set --tinker-checkpoint-root (or --save to derive <save>/tinker)"
@@ -56,24 +57,37 @@ async def serve(args, *, disposer: Disposer):
     await trainer.init(compute_trainer_args(args, actor_config))
     disposer.add(trainer)
 
+    if full_finetune:
+        # one client at a time trains the served model's every weight
+        model_config = dict(train_mode="full", n_slots=1, trains_attn=True, trains_mlp=True, trains_unembed=True)
+    else:
+        model_config = dict(
+            train_mode="lora",
+            n_slots=args.multi_lora_n_adapters,
+            lora_alpha=args.lora_alpha,
+            max_lora_rank=args.lora_rank,
+            trains_attn="attn" in args.tinker_lora_groups,
+            trains_mlp="mlp" in args.tinker_lora_groups,
+            trains_unembed="unembed" in args.tinker_lora_groups,
+        )
     config = GatewayConfig(
         base_model=args.tinker_base_model or args.hf_checkpoint,
-        n_slots=args.multi_lora_n_adapters,
         checkpoint_root=checkpoint_root,
         vocab_size=hf_config.vocab_size,
         max_tokens_per_datum=max_tokens_per_datum,
-        lora_alpha=args.lora_alpha,
-        max_lora_rank=args.lora_rank,
-        trains_attn="attn" in args.tinker_lora_groups,
-        trains_mlp="mlp" in args.tinker_lora_groups,
-        trains_unembed="unembed" in args.tinker_lora_groups,
+        **model_config,
     )
     router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
     actor_world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
     dp_size = actor_world_size // (
         args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
     )
-    service = TinkerService(MilesBackend(trainer, router_url, dp_size=dp_size), config)
+    backend = (
+        FullFinetuneBackend(trainer, router_url, inference_controller, dp_size=dp_size)
+        if full_finetune
+        else MilesBackend(trainer, router_url, dp_size=dp_size)
+    )
+    service = TinkerService(backend, config)
 
     server = uvicorn.Server(
         uvicorn.Config(

@@ -92,8 +92,10 @@ def _decode_command(op: str, payload: dict, decoded: dict) -> tuple[str, dict]:
 def model_input_tokens(model_input: dict) -> list[int]:
     tokens: list[int] = []
     for chunk in model_input["chunks"]:
-        if chunk.get("type") != "encoded_text":
-            raise UserInputError(f"unsupported model_input chunk type: {chunk.get('type')}")
+        # tinker before 0.27 omits the type of a chunk that has the default one
+        chunk_type = chunk.get("type", "encoded_text")
+        if chunk_type != "encoded_text":
+            raise UserInputError(f"unsupported model_input chunk type: {chunk_type}")
         tokens.extend(chunk["tokens"])
     return tokens
 
@@ -203,10 +205,14 @@ def render_result(result: dict) -> dict:
     if op == "save_state":
         return {"type": "save_weights", "path": result["path"]}
     if op == "save_weights_for_sampler":
-        rendered = {"type": "save_weights_for_sampler", "path": result["path"]}
         if "sampling_session_id" in result:
-            rendered["sampling_session_id"] = result["sampling_session_id"]
-        return rendered
+            # an unnamed save answers with its sampling session alone; older SDKs reject a path beside it
+            return {
+                "type": "save_weights_for_sampler",
+                "path": None,
+                "sampling_session_id": result["sampling_session_id"],
+            }
+        return {"type": "save_weights_for_sampler", "path": result["path"]}
     if op == "load_state":
         return {"type": "load_weights"}
     if op == "optim_step":

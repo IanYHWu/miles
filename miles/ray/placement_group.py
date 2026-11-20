@@ -306,13 +306,9 @@ async def update_weights(
     if rollout_id is not None:
         await orchestration_executor.run_after_step(rollout_id=rollout_id)
 
-    info: UpdatableEngines = await inference_controller.start_update_weights(model_id=trainer_model_id)
-    try:
-        weight_version = await actor_model.update_weights(info=info, rollout_id=rollout_id)
-    except BaseException:
-        await inference_controller.abort_update_weights()
-        raise
-    await inference_controller.end_update_weights(snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes)
+    weight_version = await push_weights(
+        actor_model, inference_controller, rollout_id=rollout_id, trainer_model_id=trainer_model_id
+    )
 
     await _maybe_log_inference_engine_weight_checksums(
         args, inference_controller=inference_controller, rollout_id=rollout_id, trainer_model_id=trainer_model_id
@@ -320,6 +316,24 @@ async def update_weights(
 
     if weight_version is not None:
         await rollout_executor.set_weight_version(weight_version, trainer_model_id=trainer_model_id)
+
+
+async def push_weights(
+    actor_model,
+    inference_controller: BaseWorkerHandle,
+    *,
+    rollout_id: int | None = None,
+    trainer_model_id: str | None = None,
+) -> int | None:
+    """Broadcast the trainer's weights to the engines inside one inference-controller update; -> the new version."""
+    info: UpdatableEngines = await inference_controller.start_update_weights(model_id=trainer_model_id)
+    try:
+        weight_version = await actor_model.update_weights(info=info, rollout_id=rollout_id)
+    except BaseException:
+        await inference_controller.abort_update_weights()
+        raise
+    await inference_controller.end_update_weights(snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes)
+    return weight_version
 
 
 async def _maybe_log_inference_engine_weight_checksums(

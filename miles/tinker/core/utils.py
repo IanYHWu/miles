@@ -31,6 +31,7 @@ def build_checkpoint_metadata(record: ModelRecord, config: GatewayConfig) -> dic
         # the digest proves ownership without persisting the bearer credential itself
         "tenant_digest": _tenant_digest(record.tenant),
         "base_model": record.base_model,
+        "train_mode": config.train_mode,
         "lora_rank": record.lora_rank,
         "lora_alpha": record.lora_alpha,
         "train_attn": config.trains_attn,
@@ -47,6 +48,9 @@ def read_checkpoint_metadata(checkpoint_dir: str, tenant: str, shown_path: str) 
         meta = json.loads(meta_file.read_text())
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise UserInputError(f"cannot read checkpoint {shown_path!r}: {error}") from error
+    if isinstance(meta, dict):
+        # checkpoints written before full fine-tuning name no train_mode; all of them hold adapters
+        meta.setdefault("train_mode", "lora")
     validate_checkpoint_metadata(meta, shown_path)
     if meta["tenant_digest"] != _tenant_digest(tenant):
         raise OwnershipError(f"checkpoint {shown_path!r} does not belong to this tenant")
