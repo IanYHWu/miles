@@ -76,8 +76,13 @@ def _validate_full_finetune_args(args) -> None:
         # these reduce gradients during each backward pass; a window reduces them once, at its optimizer step
         "--overlap-grad-reduce": args.overlap_grad_reduce,
         "--overlap-param-gather": args.overlap_param_gather,
-        # these move the gradients the window keeps on the GPUs between commands
+        # a sampler save is a weight push, which these skip
+        "--debug-train-only": args.debug_train_only,
+        "--debug-rollout-only": args.debug_rollout_only,
+        "--debug-skip-weight-update": args.debug_skip_weight_update,
+        # these move the gradients the window keeps on the GPUs between commands; --offload sets --offload-train later
         "--colocate": args.colocate,
+        "--offload": args.offload,
         "--offload-train": args.offload_train,
         # a new model reloads the initial weights with a fresh optimizer, which miles cannot do under these
         "--use-precision-aware-optimizer": args.use_precision_aware_optimizer,

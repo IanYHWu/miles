@@ -22,6 +22,8 @@ class FullFinetuneTrainRayActor(MegatronTrainRayActor):
         self.gradient_window = GradientWindow()
         # the weights the trainer loaded at startup, which a new model starts from
         self._holds_initial_weights = True
+        # zero moments from the start, so a save before the first step holds the state a load restores
+        self._reset_optimizer_state()
 
     @with_logs
     def forward_backward(self, batch_id: int, rollout_data_ref: StoreObjectRef) -> dict:

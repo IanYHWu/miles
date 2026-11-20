@@ -27,6 +27,15 @@ def actor(monkeypatch):
     return actor
 
 
+def test_the_trainer_starts_with_zero_moments_so_a_save_before_any_step_holds_them(actor, monkeypatch):
+    monkeypatch.setattr(actor_module.MegatronTrainRayActor, "_init_training_state", lambda self: None)
+
+    actor._init_training_state()
+
+    assert actor.calls == [("reset",)]
+    assert actor._holds_initial_weights
+
+
 def test_a_new_model_on_the_initial_weights_reloads_nothing(actor):
     actor.load_slot(0, 0, 0.0)
 

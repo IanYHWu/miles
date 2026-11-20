@@ -437,7 +437,8 @@ learning rate applies as sent: choose one for full fine-tuning. The actor is
 - **Checkpoints.** `save_state` writes a Megatron checkpoint of the weights
   and optimizer state, several times the model's size. `load_state` reads one
   back; loading it under a parallel layout other than the one it was saved
-  with is untested. A new model starts from the weights the trainer loaded at
+  with is untested. A load changes only the trainer's weights: the engines
+  serve the last push until the next sampler save. A new model starts from the weights the trainer loaded at
   startup, with a fresh optimizer. Checkpoint metadata records `train_mode`, so
   an adapter checkpoint does not load into a full fine-tuning model or the
   reverse. `weights_info` reports a full fine-tuning checkpoint as a LoRA one of
