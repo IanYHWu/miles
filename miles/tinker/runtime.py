@@ -201,7 +201,7 @@ class FullFinetuneBackend(MilesBackend):
         return None
 
     async def sample(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
-        # the service admits only the sampler of the latest push, which names no adapter on the engines
+        # whichever sampler the service admits, the engines serve their one copy of the weights, under no adapter
         return await super().sample(payload, None)
 
 

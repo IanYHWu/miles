@@ -59,8 +59,10 @@ class TinkerService:
         self._background_error: BaseException | None = None
         # why each model closed, so later requests get the reason instead of "unknown model"
         self._close_reasons: dict[str, str] = {}
-        # train_mode "full": the sampler save whose weights the engines hold; None for those they started with
-        self._served_sampler_path: str | None = None
+        # train_mode "full": the samplers the engines' weights are served to; None is the base model's
+        self._served_sampler_paths: set[str | None] = {None}
+        # train_mode "full": the model that made the latest push and has loaded no weights since
+        self._continuing_model_id: str | None = None
 
     async def run(self) -> None:
         sweep_task = asyncio.create_task(self._run_lease_sweeper())
@@ -369,6 +371,8 @@ class TinkerService:
             source_tenant = record.tenant
         meta = read_checkpoint_metadata(checkpoint_dir, source_tenant, payload["path"])
         validate_checkpoint_compatibility(meta, record, self.config, payload["path"])
+        # the next push holds what this loads, so it starts new training
+        self._continuing_model_id = None
         failure = await self.backend.load_slot(
             record.slot,
             record.lora_rank,
@@ -390,6 +394,9 @@ class TinkerService:
         path = resolve_checkpoint_dir(self.config.checkpoint_root, record.model_id, "sampler_weights", version)
         if os.path.exists(path):
             raise UserInputError(f"sampler weights {version!r} already exist; save under a new name")
+        if self.config.train_mode == "full" and record.model_id != self._continuing_model_id:
+            # the push replaces the engines' weights with ones no served sampler names
+            self._served_sampler_paths = set()
         failure = await self.backend.export_slot(
             record.slot,
             record.lora_rank,
@@ -404,7 +411,8 @@ class TinkerService:
             "path": f"tinker://{record.model_id}/sampler_weights/{version}",
         }
         if self.config.train_mode == "full":
-            self._served_sampler_path = result["path"]
+            self._served_sampler_paths.add(result["path"])
+            self._continuing_model_id = record.model_id
         if payload.get("sampler_path") is None:
             # unnamed saves return a sampling session bound to the new version
             result["sampling_session_id"] = self._new_sampling_session(
@@ -502,13 +510,18 @@ class TinkerService:
         return future.request_id, sequence_ids
 
     def _check_served(self, model_path: str | None) -> None:
-        """Full fine-tuning engines hold one copy of the weights: the latest sampler save's, or before any, those they
-        started with. A sampler naming any other weights is refused, not served the wrong ones."""
-        if model_path != self._served_sampler_path:
-            served = self._served_sampler_path or "the base model"
+        """Full fine-tuning engines hold one copy of the weights. The gateway serves it to the latest sampler save,
+        to that model's earlier saves when no load_state came between, and before any push to the base model; a
+        sample on an earlier save so starts on its weights or later ones. While a model's first push, or its first
+        after a load_state, runs, it serves no sampler."""
+        if not self._served_sampler_paths:
             raise UserInputError(
-                f"this full fine-tuning gateway serves only its latest sampler save ({served}), "
-                f"not {model_path or 'the base model'}"
+                "this full fine-tuning gateway serves no sampler until a push starting new training lands"
+            )
+        if model_path not in self._served_sampler_paths:
+            raise UserInputError(
+                "this full fine-tuning gateway serves its latest weights to their sampler, and to an earlier sampler "
+                f"only when no load_state or new model came between; not to {model_path or 'the base model'}"
             )
 
     async def _run_sample(

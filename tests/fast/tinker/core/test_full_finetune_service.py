@@ -120,7 +120,7 @@ async def test_a_checkpoint_naming_no_train_mode_holds_an_adapter(service):
     assert (await await_settled(service, "tenant", loaded)).state == DONE
 
 
-def _sample_payload(model_path: str | None) -> dict:
+def _sample_payload(model_path: str | None, **session) -> dict:
     return {
         "model_path": model_path,
         "num_samples": 1,
@@ -128,37 +128,107 @@ def _sample_payload(model_path: str | None) -> dict:
         "sampling_params": {"max_tokens": 4},
         "prompt_logprobs": False,
         "topk_prompt_logprobs": 0,
+        **session,
     }
 
 
-async def _sampler_save(service, model_id: str, seq_id: int) -> str:
-    saved = service.submit("tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": seq_id})
-    return (await await_settled(service, "tenant", saved)).result["path"]
+async def _sampler_save(service, model_id: str, seq_id: int, **payload) -> dict:
+    saved = service.submit("tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": seq_id, **payload})
+    return (await await_settled(service, "tenant", saved)).result
 
 
-async def test_full_finetune_engines_serve_only_the_latest_sampler_save(full_service):
-    """The engines hold one copy of the weights, so no sampler may be served another save's, or the base's."""
-    full_service.submit_sample("tenant", _sample_payload(None))  # before any push the engines hold the base
+async def _sampled(service, model_path: str | None, **session) -> bool:
+    request_id, _ = service.submit_sample("tenant", _sample_payload(model_path, **session))
+    return (await await_settled(service, "tenant", request_id)).state == DONE
+
+
+REFUSED = "serves its latest weights to their sampler"
+
+
+async def test_full_finetune_serves_the_latest_weights_to_earlier_saves_of_the_same_training(full_service):
+    """The engines hold one copy of the weights, the latest save's, which are an earlier save's or later."""
+    assert await _sampled(full_service, None)  # before any push the engines hold the base
 
     model_id = await created_model(full_service)
     first = await _sampler_save(full_service, model_id, 1)
-    second = await _sampler_save(full_service, model_id, 2)
+    second = await _sampler_save(full_service, model_id, 2, sampler_path="named")
 
-    request_id, _ = full_service.submit_sample("tenant", _sample_payload(second))
-    assert (await await_settled(full_service, "tenant", request_id)).state == DONE
-    for stale in (first, None):
-        with pytest.raises(UserInputError, match="serves only its latest sampler save"):
-            full_service.submit_sample("tenant", _sample_payload(stale))
+    assert await _sampled(full_service, second["path"]) and await _sampled(full_service, first["path"])
+    assert await _sampled(full_service, None, sampling_session_id=first["sampling_session_id"], seq_id=0)
+    with pytest.raises(UserInputError, match=REFUSED):
+        full_service.submit_sample("tenant", _sample_payload(None))
 
 
-async def test_a_new_full_finetune_model_samples_nothing_before_its_own_push(full_service):
+async def test_after_a_load_state_full_finetune_serves_no_earlier_save(full_service):
+    """A load starts new training, so the push after it serves none of the model's earlier saves."""
     model_id = await created_model(full_service)
-    await _sampler_save(full_service, model_id, 1)
+    checkpoint = await _saved_checkpoint(full_service, model_id)
+    before = (await _sampler_save(full_service, model_id, 2))["path"]
+    loaded = full_service.submit(
+        "tenant", "load_state", {"model_id": model_id, "seq_id": 3, "path": checkpoint, "optimizer": True}
+    )
+    assert (await await_settled(full_service, "tenant", loaded)).state == DONE
+    assert await _sampled(full_service, before), "until the next push the engines still hold that save's weights"
+
+    after = (await _sampler_save(full_service, model_id, 4))["path"]
+    assert await _sampled(full_service, after)
+    with pytest.raises(UserInputError, match=REFUSED):
+        full_service.submit_sample("tenant", _sample_payload(before))
+
+
+def _hold_exports(backend) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold each push until released, so a test can sample while one runs; returns (started, released)."""
+    started, released = asyncio.Event(), asyncio.Event()
+    export = backend.export_slot
+
+    async def held_export(*args, **kwargs):
+        started.set()
+        await released.wait()
+        return await export(*args, **kwargs)
+
+    backend.export_slot = held_export
+    return started, released
+
+
+async def test_full_finetune_serves_no_sampler_while_a_push_starting_new_training_runs(full_service):
+    """A new model's first push replaces the weights every served sampler names."""
+    model_id = await created_model(full_service)
+    started, released = _hold_exports(full_service.backend)
+    pushing = full_service.submit("tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": 1})
+    await started.wait()
+    with pytest.raises(UserInputError, match="serves no sampler until a push starting new training lands"):
+        full_service.submit_sample("tenant", _sample_payload(None))
+
+    released.set()
+    assert await _sampled(full_service, (await await_settled(full_service, "tenant", pushing)).result["path"])
+
+
+async def test_full_finetune_serves_earlier_saves_while_a_push_continuing_their_training_runs(full_service):
+    """The weights under such a sample are the earlier save's or the new push's, both that save's or later."""
+    model_id = await created_model(full_service)
+    first = (await _sampler_save(full_service, model_id, 1))["path"]
+    started, released = _hold_exports(full_service.backend)
+    pushing = full_service.submit("tenant", "save_weights_for_sampler", {"model_id": model_id, "seq_id": 2})
+    await started.wait()
+    assert await _sampled(full_service, first)
+
+    released.set()
+    assert (await await_settled(full_service, "tenant", pushing)).state == DONE
+
+
+async def test_full_finetune_serves_no_save_of_a_closed_model_after_the_next_push(full_service):
+    model_id = await created_model(full_service)
+    earlier = (await _sampler_save(full_service, model_id, 1))["path"]
     full_service.backend.fail_next = {"error": "batch rejected"}  # a failed batch closes the model
     closing = full_service.submit("tenant", "forward_backward", fb_payload(model_id, 2, [datum()]))
     await await_settled(full_service, "tenant", closing)
     assert model_id not in full_service.models
 
-    await created_model(full_service, tenant="other")
-    with pytest.raises(UserInputError, match="serves only its latest sampler save"):
-        full_service.submit_sample("other", _sample_payload(None))
+    new_model_id = await created_model(full_service)
+    with pytest.raises(UserInputError, match=REFUSED):
+        full_service.submit_sample("tenant", _sample_payload(None))  # the engines still hold the closed model's push
+    assert await _sampled(full_service, earlier)
+
+    await _sampler_save(full_service, new_model_id, 1)
+    with pytest.raises(UserInputError, match=REFUSED):
+        full_service.submit_sample("tenant", _sample_payload(earlier))

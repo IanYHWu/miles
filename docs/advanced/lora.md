@@ -431,15 +431,23 @@ learning rate applies as sent: choose one for full fine-tuning. The actor is
   in `miles/tinker/arguments.py` lists them with the reason for each.
 - **Sampling.** A sampler save pushes the weights to the engines, as a
   training step does, and records only the save's metadata. The engines hold
-  one copy of the weights, so the gateway serves only the latest save's
-  sampler, or before any push the base model, and refuses every other one. A
-  push during sampling changes the weights under the samples in flight.
+  one copy of the weights. The gateway serves it to the latest save's sampler,
+  to the same model's earlier saves when no `load_state` came between, and
+  before any push to the base model; it refuses every other sampler. A sample
+  on an earlier save so starts on that save's weights or later ones, and
+  nothing in the result says which. A sampler save keeps no weights, so its
+  own can no longer be sampled once a later push lands; to sample a
+  `save_state` checkpoint's weights, `load_state` it and save for the sampler
+  again. During a model's first push, or its first after a `load_state`, the
+  gateway serves no sampler. A push during sampling changes the weights under
+  the samples in flight.
 - **Checkpoints.** `save_state` writes a Megatron checkpoint of the weights
   and optimizer state, several times the model's size. `load_state` reads one
   back; loading it under a parallel layout other than the one it was saved
   with is untested. A load changes only the trainer's weights: the engines
-  serve the last push until the next sampler save. A new model starts from the weights the trainer loaded at
-  startup, with a fresh optimizer. Checkpoint metadata records `train_mode`, so
-  an adapter checkpoint does not load into a full fine-tuning model or the
-  reverse. `weights_info` reports a full fine-tuning checkpoint as a LoRA one of
-  rank 0, because the SDK resumes only LoRA training clients.
+  serve the last push until the next sampler save. A new model starts from the
+  weights the trainer loaded at startup, with a fresh optimizer. Checkpoint
+  metadata records `train_mode`, so an adapter checkpoint does not load into a
+  full fine-tuning model or the reverse. `weights_info` reports a full
+  fine-tuning checkpoint as a LoRA one of rank 0, because the SDK resumes only
+  LoRA training clients.
