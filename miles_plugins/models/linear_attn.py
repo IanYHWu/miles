@@ -14,6 +14,7 @@ subclass declares the projections under the HF names, plain bf16 linears on shar
 from __future__ import annotations
 
 import functools
+import importlib
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -165,12 +166,45 @@ class _ContiguousGrad(torch.autograd.Function):
         return grad.contiguous()
 
 
+# fla's GDN-path Triton kernels whose autotune key includes the size bucket ``NB``.
+_SIZE_KEYED_AUTOTUNE_KERNELS = {
+    "fla.modules.conv.triton.kernels": ("causal_conv1d_fwd_kernel", "causal_conv1d_bwd_kernel"),
+    "fla.modules.l2norm": ("l2norm_fwd_kernel", "l2norm_bwd_kernel"),
+    "fla.modules.fused_norm_gate": ("layer_norm_gated_fwd_kernel", "layer_norm_gated_bwd_kernel"),
+}
+
+
+@functools.cache
+def _freeze_size_keyed_autotune() -> None:
+    """Tune fla's size-bucketed GDN kernels once per model shape instead of once per packed length.
+
+    Causal conv1d autotunes on ``NB = cdiv(B*T, 1024)``, l2norm and the gated RMSNorm on
+    ``cdiv(T, 65536)``, so every new packed length (most microbatches of variable-length training)
+    re-benchmarks every config, forward and backward. Dropping ``NB`` from their autotune keys changes
+    only which launch config is picked. ``MILES_FLA_SIZE_KEYED_AUTOTUNE=1`` keeps fla's keys."""
+    if os.environ.get("MILES_FLA_SIZE_KEYED_AUTOTUNE") == "1":
+        return
+    for module_name, kernel_names in _SIZE_KEYED_AUTOTUNE_KERNELS.items():
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        for name in kernel_names:
+            tuner = getattr(module, name, None)
+            while tuner is not None and not hasattr(tuner, "keys"):  # under @triton.heuristics
+                tuner = getattr(tuner, "fn", None)
+            keys = getattr(tuner, "keys", None)
+            if isinstance(keys, list) and "NB" in keys:
+                keys.remove("NB")
+
+
 def causal_short_conv(x, weight, activation, backend, cu_seqlens=None, cp_context=None):
     """Depthwise causal conv of ``x`` ``[b, s, C]`` with ``weight`` ``[C, K]`` through fla. fla indexes with
     int32, so inputs past 2**31 elements (long sequences at low TP) run as channel chunks of at most
     2**30; the conv is per channel, so this is exact."""
     from fla.modules.conv.causal_conv1d import causal_conv1d
 
+    _freeze_size_keyed_autotune()
     tokens = x.shape[0] * x.shape[1]
     kwargs = {
         "bias": None,
