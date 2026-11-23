@@ -68,6 +68,7 @@ from miles.utils.workers.rpc.common.wire_types import Pickled
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
 from ..training_utils.parallel import get_parallel_state
+from . import main_params
 from .checkpoint import load_checkpoint
 from .ft.checkpoint_transfer import recv_ckpt
 from .ft.checkpoint_transfer import send_ckpt as _send_ckpt
@@ -88,6 +89,7 @@ from .optimizer_state_swap import OptimizerStateStash
 from .optimizer_utils import reset_optimizer_state
 from .parallel import verify_megatron_parallel_state
 from .replay_utils import register_replay_list_moe
+from .training_phase import start_new_optimizer_run
 
 logging.getLogger("megatron").setLevel(logging.WARNING)
 
@@ -944,6 +946,42 @@ class MegatronTrainRayActor(TrainRayActor):
         every rank streams the HF export, global rank 0 broadcasts and answers)."""
         self._heartbeat.bump()
         return self.vllm_weight_updater.push(version)
+
+    @with_logs
+    @timer
+    def save_main_params(self, path: str) -> dict:
+        """Write the distributed optimizer's fp32 main params, without moments, to ``path`` (collective)."""
+        self._assert_single_trainer("save_main_params")
+        self._heartbeat.bump()
+        return main_params.save_main_params(self.model, self.optimizer, path)
+
+    @with_logs
+    @timer
+    def load_main_params(self, path: str, max_mismatch_fraction: float = 1e-4) -> dict:
+        """Restore fp32 main params written by ``save_main_params`` over the ones derived from the loaded
+        bf16 weights, which must be bf16 of them (collective)."""
+        self._assert_single_trainer("load_main_params")
+        self._heartbeat.bump()
+        return main_params.load_main_params(
+            self.model, self.optimizer, path, max_mismatch_fraction=max_mismatch_fraction
+        )
+
+    @with_logs
+    @timer
+    def optimizer_state_summary(self) -> dict:
+        """Check a restored optimizer: bf16(main params) == model weights, and the moment magnitudes."""
+        self._assert_single_trainer("optimizer_state_summary")
+        self._heartbeat.bump()
+        return main_params.optimizer_state_summary(self.model, self.optimizer)
+
+    @with_logs
+    @timer
+    def reset_optimizer_for_new_run(self) -> dict:
+        """Start a fresh optimizer run on the loaded fp32 main params: zero moments and step, and restart
+        the LR schedule at step 0."""
+        self._assert_single_trainer("reset_optimizer_for_new_run")
+        self._heartbeat.bump()
+        return start_new_optimizer_run(self.optimizer, self.opt_param_scheduler)
 
     @with_logs
     @timer

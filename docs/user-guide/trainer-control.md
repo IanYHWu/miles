@@ -19,3 +19,14 @@ await actor.swap_optimizer_state("sft", "rl")
 ```
 
 A Megatron checkpoint (`--save`) holds only the active history. `save_stashed_optimizer_states(directory)` writes the stashed ones next to it (one file per rank), and `load_stashed_optimizer_states(directory)` reads them back after a restart from that checkpoint; a directory without them loads nothing. Histories are refused when the optimizer class has no known history schema (Adam and the Muon variants have one), and a restore is checked against the optimizer's layout before anything is written.
+
+## fp32 main params across jobs
+
+With bf16 training, the distributed optimizer keeps fp32 main params and the model holds bf16 copies of them. A job that loads only bf16 weights re-derives the main params by upcasting, which rounds away updates smaller than bf16 precision; for jobs that take only a few small optimizer steps this loses most of each update. A full Megatron checkpoint keeps them, but also the two fp32 moments (about 14 bytes per parameter instead of 4).
+
+- `save_main_params(path)` writes only the fp32 main params: one set of safetensors files per (TP, PP) rank, each holding its local parameters in full, plus `layout.json`. Parameters the optimizer does not own (frozen ones) are skipped; their bf16 weights are authoritative.
+- `load_main_params(path, max_mismatch_fraction=1e-4)`, called after the bf16 weights were loaded, overwrites each rank's main-param shards. It requires the same TP and PP sizes (DP and CP may differ) and checks that the bf16 weights equal bf16 of the loaded main params: more than `max_mismatch_fraction` mismatching elements in a tensor, or saved tensors no parameter consumes, raise.
+- `optimizer_state_summary()` reports, after any load, how many bf16 weights differ from bf16(main params), the summed magnitudes of the Adam moments (zero for a fresh optimizer) and the step counters.
+- `reset_optimizer_for_new_run()`, after loading a checkpoint with optimizer state, keeps its main params but zeroes the moments and steps and restarts the LR schedule at step 0.
+
+The main-param calls need main params on the GPU: `--use-precision-aware-optimizer` and `--optimizer-cpu-offload` are refused, and all of the optimizer's parts must share one data-parallel group.

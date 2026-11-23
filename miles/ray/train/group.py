@@ -428,6 +428,26 @@ class TrainerController:
         self._assert_one_cell("vllm_push")
         return await self._execute_first_alive("vllm_push", version=version)
 
+    async def save_main_params(self, path: str) -> list:
+        """Write fp32 main params without optimizer moments; see megatron_utils/main_params.py."""
+        self._assert_one_cell("save_main_params")
+        return await self._execute_first_alive("save_main_params", path=path)
+
+    async def load_main_params(self, path: str, max_mismatch_fraction: float = 1e-4) -> list:
+        """Restore fp32 main params written by ``save_main_params`` after the bf16 weights were loaded."""
+        self._assert_one_cell("load_main_params")
+        return await self._execute_first_alive(
+            "load_main_params", path=path, max_mismatch_fraction=max_mismatch_fraction
+        )
+
+    async def optimizer_state_summary(self) -> list:
+        self._assert_one_cell("optimizer_state_summary")
+        return await self._execute_first_alive("optimizer_state_summary")
+
+    async def reset_optimizer_for_new_run(self) -> list:
+        self._assert_one_cell("reset_optimizer_for_new_run")
+        return await self._execute_first_alive("reset_optimizer_for_new_run")
+
     async def swap_optimizer_state(self, stash_as: str, load: str) -> list:
         """Stash the active optimizer history as ``stash_as`` and activate ``load``; see optimizer_state_swap."""
         self._assert_one_cell("swap_optimizer_state")
