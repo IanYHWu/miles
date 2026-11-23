@@ -102,3 +102,13 @@ def test_a_successful_push_reports_the_pusher_metrics(rank):
     with patch.object(updater_module, "VllmPusher", return_value=pusher):
         updater.connect([], "nccl.so", **TIMEOUTS)
     assert updater.push("5") == {"version": "5", "tensors": 3, "ok": True}
+
+
+def test_a_push_with_no_servers_is_not_reported_ok(rank):
+    pusher = MagicMock()
+    pusher.connect.return_value = {}
+    pusher.push.side_effect = lambda stream, version: {"skipped": "no servers", "ok": False, "n": len(list(stream))}
+    updater = VllmWeightUpdater(_stream([]))
+    with patch.object(updater_module, "VllmPusher", return_value=pusher):
+        updater.connect([], "nccl.so", **TIMEOUTS)
+    assert updater.push("6") == {"skipped": "no servers", "ok": False, "n": 3}

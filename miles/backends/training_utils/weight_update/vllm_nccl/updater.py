@@ -74,7 +74,8 @@ class VllmWeightUpdater:
         try:
             if self._pusher is None:
                 raise RuntimeError("not connected to any server (vllm_connect failed or was not called)")
-            return dict(self._pusher.push(stream, version), ok=True)
+            # the pusher's own ok wins: a push with no servers to send to sends nothing and is not ok
+            return {"ok": True, **self._pusher.push(stream, version)}
         except Exception as error:  # noqa: BLE001 - returned, not raised: a raise kills the trainer cell
             logger.exception("VLLM_PUSH push failed")
             for _ in stream:  # the other ranks are still in the gather collectives: finish them
