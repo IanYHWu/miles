@@ -14,6 +14,16 @@ MASK_GENERATOR = None
 SAMPLE_PRINTED = False
 
 
+def _plain_text_loss_mask(tokenizer, text: str, eos_token: str | None) -> tuple[list[int], list[int]]:
+    """Next-token prediction on ``text``: its tokens plus ``eos_token``, loss on every token after the first."""
+    eos_token = eos_token if eos_token is not None else tokenizer.eos_token
+    eos_id = tokenizer.convert_tokens_to_ids(eos_token) if eos_token is not None else None
+    if eos_id is None or eos_id == tokenizer.unk_token_id:
+        raise ValueError(f"--sft-text-eos-token {eos_token!r} is not a token of this tokenizer")
+    token_ids = tokenizer(text, add_special_tokens=False)["input_ids"] + [eos_id]
+    return token_ids, [0] + [1] * (len(token_ids) - 1)
+
+
 def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
     """An example to implement the generate_rollout function for an rule based rm rollout generation.
 
@@ -48,7 +58,10 @@ def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
         messages = sample.prompt
         tools = sample.metadata.get("tools", None)
 
-        token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
+        if isinstance(messages, str):
+            token_ids, loss_mask = _plain_text_loss_mask(TOKENIZER, messages, args.sft_text_eos_token)
+        else:
+            token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
 
         response_length = MASK_GENERATOR.get_response_lengths([loss_mask])[0]
 

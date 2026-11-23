@@ -174,6 +174,7 @@ Sections mirror the launch-script argument groups.
 | `--label-key` | str | `None` | JSONL key to `Sample.label`. |
 | `--metadata-key` | str | `metadata` | JSONL key to `Sample.metadata`. |
 | `--apply-chat-template` | flag | off | Apply tokenizer chat template. |
+| `--sft-text-eos-token` | str | tokenizer `eos_token` | Token `sft_rollout` appends to a plain-string prompt, rendered as next-token prediction on the text ([SFT](/user-guide/sft)). |
 | `--rollout-shuffle` | flag | off | Shuffle prompts each rollout. |
 | `--num-rollout` | int | – | Total rollout iterations. If unset, derived from dataset size. |
 | `--rollout-batch-size` | int | – | Prompts per rollout. |

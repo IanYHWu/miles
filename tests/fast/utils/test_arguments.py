@@ -73,6 +73,7 @@ _NOT_ACTUALLY_SECRET_ARG_NAMES = frozenset(
         "opd_teacher_key",
         "reward_key",
         "router_allow_requests_without_routing_key",
+        "sft_text_eos_token",
         "tool_key",
     }
 )

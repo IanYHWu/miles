@@ -2602,6 +2602,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Loss mask type",
             )
             parser.add_argument(
+                "--sft-text-eos-token",
+                type=str,
+                default=None,
+                help=(
+                    "miles.rollout.sft_rollout renders a sample whose prompt is a plain string (no chat "
+                    "messages) as next-token prediction on the text: its tokens plus this token, with loss on "
+                    "every token after the first. Defaults to the tokenizer's eos_token; chat models often "
+                    "need their document separator instead (e.g. <|endoftext|> for Qwen)."
+                ),
+            )
+            parser.add_argument(
                 "--data-pad-size-multiplier",
                 type=int,
                 default=128,
