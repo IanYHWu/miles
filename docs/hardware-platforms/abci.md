@@ -139,7 +139,18 @@ For dedicated 122B training, set `MILES_MODEL_NAME=Qwen3.5-122B-A10B`,
 then request eight nodes. `MILES_OPTIMIZER_CPU_OFFLOAD=0` selects GPU Adam
 with FP32 moments; production saves include optimizer state. This configuration
 uses rollout routing replay and disaggregated inference with `in_place` pauses.
+For attention TP=2 / DP=4 with EP=8 inside each eight-GPU rollout engine, add
+`MILES_ROLLOUT_DP=4`, `MILES_ROLLOUT_EP=8`,
+`MILES_ROLLOUT_MAX_RUNNING_REQUESTS=192`,
+`MILES_ROLLOUT_MAX_MAMBA_CACHE_SIZE=1280`, and
+`MILES_ROLLOUT_ROUTER_POLICY=round_robin`. Keep `MILES_ROLLOUT_TP=8`: this
+field selects total GPUs per engine, with attention TP derived by dividing it
+by DP. The Mamba cache limit is global per engine and divided across DP workers.
 Long-sequence peak memory must still be measured on the allocated GPUs.
+
+`MILES_CHECK_INITIAL_WEIGHTS=1` checks the first trainer broadcast against the
+original HF weights before generation. Use it for fresh runs only; the automatic
+checkpoint-resume verification removes this check when restoring trained weights.
 
 `MILES_CHECKPOINT_DIR` may select a dedicated directory on group storage. The
 wrapper binds that directory writable while keeping the rest of `/groups`
@@ -152,7 +163,8 @@ phase fails or the expected checkpoint is missing.
 
 The production PBS template requests 64 hours. For a continuation, set `MILES_LOAD`
 and `MILES_CHECKPOINT_DIR` to the same existing checkpoint root. This restores
-training and rollout state and lets retention delete the previous checkpoint
+training and rollout state, including the checkpoint's constant learning-rate and
+weight-decay schedule and its elapsed-step counter, and lets retention delete the previous checkpoint
 after its replacement succeeds, without copying model weights. `MILES_NUM_ROLLOUT`
 is the total update target, including restored updates.
 

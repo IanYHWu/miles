@@ -35,6 +35,12 @@ def _parser():
     p.add_argument("--train-cp", type=int, default=1)
     p.add_argument("--train-ep", type=int, default=1)
     p.add_argument("--rollout-tp", type=int, default=1)
+    p.add_argument("--rollout-dp", type=int, default=1)
+    p.add_argument("--rollout-ep", type=int, default=1)
+    p.add_argument("--rollout-max-running-requests", type=int, default=64)
+    p.add_argument("--rollout-max-mamba-cache-size", type=int)
+    p.add_argument("--rollout-router-policy", choices=["cache_aware", "round_robin"], default="cache_aware")
+    p.add_argument("--check-initial-weights", action="store_true")
     p.add_argument("--optimizer-cpu-offload", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--verify-resume-after-updates", type=int, default=0)
     p.add_argument("--num-rollout", type=int, default=100)
@@ -150,6 +156,18 @@ def _execute_recipe(args):
             "--num-rollout",
             str(args.num_rollout),
         ]
+        for name in (
+            "rollout_dp",
+            "rollout_ep",
+            "rollout_max_running_requests",
+            "rollout_max_mamba_cache_size",
+            "rollout_router_policy",
+        ):
+            value = getattr(args, name)
+            if value is not None:
+                argv += ["--" + name.replace("_", "-"), str(value)]
+        if args.check_initial_weights:
+            argv.append("--check-initial-weights")
         if args.eval_before_train:
             argv.append("--no-skip-eval-before-train")
         if args.verify_resume_after_updates:
@@ -223,7 +241,8 @@ def _verify_training_resume(args, argv, run_dir):
     _run(argv + ["--extra-args", f"--debug-exit-after-rollout {updates}"])
     if not tracker.is_file() or int(tracker.read_text()) != updates - 1:
         raise RuntimeError("Initial training phase did not publish the expected checkpoint")
-    resumed = list(argv)
+    # A restored policy no longer equals the original HF checkpoint.
+    resumed = [arg for arg in argv if arg != "--check-initial-weights"]
     resumed[resumed.index("--load") + 1] = str(checkpoint)
     if "--no-skip-eval-before-train" not in resumed:
         resumed.append("--no-skip-eval-before-train")

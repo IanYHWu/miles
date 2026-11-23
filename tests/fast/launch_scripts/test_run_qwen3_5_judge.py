@@ -181,3 +181,64 @@ def test_the_smoke_reward_fixture_answers_the_score_key():
     from tests.manual.judged_smoke_fixture import reward
 
     assert [asyncio.run(reward(None, SimpleNamespace(index=i))) for i in range(2)] == [{"score": 0.0}, {"score": 1.0}]
+
+
+def test_dp_attention_recipe_preserves_rl_settings_and_uses_one_engine_per_node():
+    launcher = import_launch_script(REPO_ROOT / "scripts/run_qwen3_5_judge.py")
+    args = launcher.ScriptArgs(
+        model_name="Qwen3.5-122B-A10B",
+        actor_num_nodes=4,
+        rollout_gpus=32,
+        train_cp=2,
+        train_ep=32,
+        rollout_tp=8,
+        rollout_dp=4,
+        rollout_ep=8,
+        rollout_max_running_requests=192,
+        rollout_max_mamba_cache_size=1280,
+        rollout_router_policy="round_robin",
+        check_initial_weights=True,
+        optimizer_cpu_offload=False,
+        num_rollout=120,
+    )
+    flags = shlex.split(launcher._train_args(args))
+    for flag, value in {
+        "--rollout-num-gpus-per-engine": "8",
+        "--sglang-data-parallel-size": "4",
+        "--sglang-ep-size": "8",
+        "--sglang-max-running-requests": "192",
+        "--sglang-max-mamba-cache-size": "1280",
+        "--sglang-router-policy": "round_robin",
+        "--rollout-max-response-len": "92160",
+        "--async-max-concurrent-samples": "1024",
+        "--update-weights-interval": "2",
+        "--pause-generation-mode": "in_place",
+        "--global-batch-size": "512",
+    }.items():
+        assert flags.count(flag) == 1
+        assert flags[flags.index(flag) + 1] == value
+    assert "--sglang-enable-dp-attention" in flags
+    assert "--check-weight-update-equal" in flags
+    assert "--use-rollout-routing-replay" in flags
+
+
+def test_invalid_rollout_topology_and_resume_comparison_are_rejected():
+    launcher = import_launch_script(REPO_ROOT / "scripts/run_qwen3_5_judge.py")
+    for overrides in ({"rollout_dp": 3}, {"rollout_ep": 3}):
+        with pytest.raises(ValueError, match="divisible"):
+            launcher.ScriptArgs(rollout_tp=8, **overrides)
+    with pytest.raises(ValueError, match="fresh run"):
+        launcher.ScriptArgs(check_initial_weights=True, load="/checkpoint")
+
+
+@pytest.mark.parametrize("load", ["", "/existing/checkpoints"])
+def test_constant_rate_continuation_restores_scheduler_without_resetting_optimizer(load):
+    launcher = import_launch_script(REPO_ROOT / "scripts/run_qwen3_5_judge.py")
+    args = launcher.ScriptArgs(num_rollout=240, load=load)
+    flags = shlex.split(launcher._train_args(args))
+    assert ("--use-checkpoint-opt-param-scheduler" in flags) == bool(load)
+    assert flags[flags.index("--num-rollout") + 1] == "240"
+    assert flags[flags.index("--lr-decay-style") + 1] == "constant"
+    assert flags[flags.index("--save-retain-interval") + 1] == "245"
+    for flag in ("--override-opt-param-scheduler", "--no-load-optim", "--finetune"):
+        assert flag not in flags

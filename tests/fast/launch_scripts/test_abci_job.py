@@ -205,7 +205,7 @@ def test_production_resume_verification_requires_published_checkpoint(monkeypatc
             (tmp_path / "latest_checkpointed_iteration.txt").write_text("4")
 
     monkeypatch.setattr(launch, "_run", run)
-    argv = ["python", "recipe.py", "--load", "", "--num-rollout", "120"]
+    argv = ["python", "recipe.py", "--load", "", "--num-rollout", "120", "--check-initial-weights"]
     if initial_failure:
         with pytest.raises(RuntimeError, match="expected checkpoint"):
             launch._verify_training_resume(args, argv, tmp_path)
@@ -217,4 +217,35 @@ def test_production_resume_verification_requires_published_checkpoint(monkeypatc
         assert calls[1][calls[1].index("--load") + 1] == str(tmp_path)
         assert "--no-skip-eval-before-train" in calls[1]
         assert "--extra-args" not in calls[1]
+        assert "--check-initial-weights" in calls[0]
+        assert "--check-initial-weights" not in calls[1]
         assert calls[1][calls[1].index("--num-rollout") + 1] == "120"
+
+
+def test_train_forwards_dp_attention_capacity_and_initial_verification(monkeypatch, tmp_path):
+    options = {
+        "mode": "train",
+        "image": "unused",
+        "repo": "unused",
+        "scratch": str(tmp_path),
+        "model-dir": "unused",
+        "data-dir": "unused",
+        "judge-config": "unused",
+        "rollout-tp": "8",
+        "rollout-dp": "4",
+        "rollout-ep": "8",
+        "rollout-max-running-requests": "192",
+        "rollout-max-mamba-cache-size": "1280",
+        "rollout-router-policy": "round_robin",
+    }
+    argv = [part for key, value in options.items() for part in ("--" + key, value)]
+    args = launch._parser().parse_args(argv + ["--check-initial-weights"])
+    monkeypatch.setenv("PBS_JOBID", "123.pbs")
+    calls = []
+    monkeypatch.setattr(launch, "_run", calls.append)
+    launch._execute_recipe(args)
+    (recipe,) = calls
+    for name in options:
+        if name.startswith("rollout-"):
+            assert recipe[recipe.index("--" + name) + 1] == options[name]
+    assert "--check-initial-weights" in recipe

@@ -17,6 +17,12 @@ fi
 if [[ "${MILES_OPTIMIZER_CPU_OFFLOAD:-1}" == "0" ]]; then
   extra_args+=(--no-optimizer-cpu-offload)
 fi
+if [[ -n "${MILES_ROLLOUT_MAX_MAMBA_CACHE_SIZE:-}" ]]; then
+  extra_args+=(--rollout-max-mamba-cache-size "${MILES_ROLLOUT_MAX_MAMBA_CACHE_SIZE}")
+fi
+if [[ "${MILES_CHECK_INITIAL_WEIGHTS:-0}" == "1" ]]; then
+  extra_args+=(--check-initial-weights)
+fi
 exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode train \
   --repo "${MILES_REPO}" --image "${MILES_IMAGE}" --scratch "${MILES_SCRATCH}" \
   --container-root "${MILES_CONTAINER_ROOT:-}" \
@@ -28,6 +34,9 @@ exec python3 "${MILES_REPO}/tools/abci/launch.py" --mode train \
   --actor-nodes "${MILES_ACTOR_NODES:-1}" --rollout-nodes "${MILES_ROLLOUT_NODES:-1}" \
   --train-tp "${MILES_TRAIN_TP:-4}" --train-cp "${MILES_TRAIN_CP:-1}" --train-ep "${MILES_TRAIN_EP:-1}" \
   --rollout-tp "${MILES_ROLLOUT_TP:-1}" --num-rollout "${MILES_NUM_ROLLOUT:-100}" \
+  --rollout-dp "${MILES_ROLLOUT_DP:-1}" --rollout-ep "${MILES_ROLLOUT_EP:-1}" \
+  --rollout-max-running-requests "${MILES_ROLLOUT_MAX_RUNNING_REQUESTS:-64}" \
+  --rollout-router-policy "${MILES_ROLLOUT_ROUTER_POLICY:-cache_aware}" \
   --ray-object-store-gb "${MILES_RAY_OBJECT_STORE_GB:-16}" \
   --verify-resume-after-updates "${MILES_VERIFY_RESUME_AFTER_UPDATES:-0}" \
   --wandb-project "${MILES_WANDB_PROJECT:-}" --wandb-entity "${MILES_WANDB_ENTITY:-}" "${extra_args[@]}"

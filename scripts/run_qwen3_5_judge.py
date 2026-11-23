@@ -42,6 +42,12 @@ class ScriptArgs(U.ExecuteTrainConfig):
     train_ep: int = 1
     optimizer_cpu_offload: bool = True
     rollout_tp: int = 1
+    rollout_dp: int = 1
+    rollout_ep: int = 1
+    rollout_max_running_requests: int = 64
+    rollout_max_mamba_cache_size: int | None = None
+    rollout_router_policy: Literal["cache_aware", "round_robin"] = "cache_aware"
+    check_initial_weights: bool = False
     num_rollout: int = 100
     rollout_batch_size: int = 32
     samples_per_prompt: int = 16
@@ -98,6 +104,14 @@ class ScriptArgs(U.ExecuteTrainConfig):
             raise ValueError("Training GPUs must be divisible by TP * CP and by expert parallel size")
         if self.rollout_gpus % self.rollout_tp:
             raise ValueError("Rollout GPUs must be divisible by inference TP")
+        if min(self.rollout_dp, self.rollout_ep, self.rollout_max_running_requests) < 1:
+            raise ValueError("Rollout DP, EP and request capacity must be positive")
+        if self.rollout_tp % self.rollout_dp or self.rollout_tp % self.rollout_ep:
+            raise ValueError("GPUs per rollout engine must be divisible by attention DP and EP")
+        if self.rollout_max_mamba_cache_size is not None and self.rollout_max_mamba_cache_size < 1:
+            raise ValueError("Mamba cache size must be positive")
+        if self.check_initial_weights and self.load:
+            raise ValueError("Initial HF weight comparison requires a fresh run without --load")
         if self.model_name == "Qwen3.5-122B-A10B" and not self.smoke and self.train_ep == 1:
             raise ValueError("122B production requires an explicit expert-parallel topology")
 
@@ -109,6 +123,11 @@ def _train_args(args):
     colocate = moe and args.smoke
     checkpoint_dir = args.checkpoint_dir or f"{args.output_dir}/{args.run_id}/checkpoints"
     checkpoint = f"--hf-checkpoint {q(model)} --ref-load {q(model)} --load {q(args.load or model)} --save {q(checkpoint_dir)} --save-interval {args.num_rollout if args.async_smoke else 2 if args.smoke else args.save_interval} "
+    if args.load:
+        # This recipe has constant LR/weight decay. Preserve their checkpoint
+        # values and elapsed scheduler steps when extending the update target;
+        # the old schedule horizon does not limit constant-rate training.
+        checkpoint += "--use-checkpoint-opt-param-scheduler "
     if args.keep_latest_checkpoint and not args.smoke:
         # Megatron deletes the previous completed save after finalizing the new one.
         # Put the permanent-retention milestone beyond this run's last iteration.
@@ -142,8 +161,18 @@ def _train_args(args):
         f"--num-gpus-per-node {args.num_gpus_per_node} --actor-num-nodes {args.actor_num_nodes} "
         f"--actor-num-gpus-per-node {args.actor_gpus} "
         f"--rollout-num-gpus-per-engine {args.rollout_tp} --sglang-context-length {args.context_length} "
-        "--sglang-mem-fraction-static 0.85 --sglang-max-running-requests 64 --sglang-chunked-prefill-size 8192 "
+        f"--sglang-mem-fraction-static 0.85 --sglang-max-running-requests {args.rollout_max_running_requests} --sglang-chunked-prefill-size 8192 "
     )
+    if args.rollout_dp > 1:
+        engines += f"--sglang-enable-dp-attention --sglang-data-parallel-size {args.rollout_dp} "
+    if args.rollout_ep > 1:
+        engines += f"--sglang-ep-size {args.rollout_ep} "
+    if args.rollout_max_mamba_cache_size is not None:
+        engines += f"--sglang-max-mamba-cache-size {args.rollout_max_mamba_cache_size} "
+    if args.rollout_router_policy != "cache_aware":
+        engines += f"--sglang-router-policy {args.rollout_router_policy} "
+    if args.check_initial_weights:
+        engines += "--check-weight-update-equal --check-weight-update-skip-list visual mtp "
     if moe:
         engines += "--use-rollout-routing-replay "
         performance += f"--expert-model-parallel-size {args.train_ep} --expert-tensor-parallel-size 1 "
