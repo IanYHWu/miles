@@ -30,3 +30,25 @@ With bf16 training, the distributed optimizer keeps fp32 main params and the mod
 - `reset_optimizer_for_new_run()`, after loading a checkpoint with optimizer state, keeps its main params but zeroes the moments and steps and restarts the LR schedule at step 0.
 
 The main-param calls need main params on the GPU: `--use-precision-aware-optimizer` and `--optimizer-cpu-offload` are refused, and all of the optimizer's parts must share one data-parallel group.
+
+## Switching objective and schedule in place
+
+`set_phase(args_overrides, scheduler, reset_optimizer)` changes what a resident trainer optimizes, so one process can alternate, say, RL steps at a constant LR with supervised steps on a cosine schedule, without restarting:
+
+```python
+await actor.set_phase(
+    {"loss_type": "sft_loss", "compute_advantages_and_returns": False},
+    {"max_lr": 2e-6, "min_lr": 2e-7, "init_lr": 0.0, "lr_warmup_steps": 64, "lr_decay_steps": 1280,
+     "lr_decay_style": "cosine", "start_wd": 0.1, "end_wd": 0.1, "wd_incr_steps": 1280,
+     "wd_incr_style": "constant", "num_steps": 0},
+    reset_optimizer=True,
+)
+```
+
+`args_overrides` are set on the trainer's arguments (each must already exist). `scheduler` replaces fields of Megatron's `OptimizerParamScheduler`, whose units are samples (miles steps it by each step's global batch); `max_lr`, `min_lr`, `start_wd` and `end_wd` also replace a param group's own override, so per-group LR differences do not survive a phase switch. `reset_optimizer` zeroes the optimizer history; to keep one history per phase instead, swap histories first. Every param group's LR and weight decay are then re-derived at the scheduler's current step, and the call returns them.
+
+## Measurements and checkpoints
+
+- `probe_logprobs(path)` returns, on global rank 0, the teacher-forced log-prob of every target token of a fixed probe set: JSONL rows of `tokens` and a 0/1 `loss_mask` ending in one contiguous target, with a row count divisible by the DP size (CP and PP must be 1). Comparing two calls measures how far an update moved the model. A failure is returned as `{"error": ...}`.
+- `gpu_memory_peak(reset=True)` returns each rank's peak allocated and reserved GPU memory in GiB since the last reset.
+- `save_training_state(iteration)` writes a Megatron checkpoint (model, distributed optimizer, LR scheduler) to `--save` without the HF export that `save_model` adds; a later job resumes it with `--load`.

@@ -28,6 +28,20 @@ def available_memory():
     }
 
 
+def peak_memory(reset: bool = True) -> dict:
+    """This rank's peak allocated / reserved GPU memory (GiB, unrounded) since the last reset."""
+    device = torch.cuda.current_device()
+    stats = {
+        "rank": dist.get_rank(),
+        "max_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30,
+        "max_reserved_gib": torch.cuda.max_memory_reserved(device) / 2**30,
+        "total_gib": torch.cuda.get_device_properties(device).total_memory / 2**30,
+    }
+    if reset:
+        torch.cuda.reset_peak_memory_stats(device)
+    return stats
+
+
 def _byte_to_gb(n: int):
     return round(n / (1024**3), 2)
 

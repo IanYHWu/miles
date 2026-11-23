@@ -53,7 +53,7 @@ from miles.utils.context_utils import with_defer
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.lora.utils import build_lora_config, is_multi_lora_enabled
-from miles.utils.memory_utils import clear_memory, print_memory
+from miles.utils.memory_utils import clear_memory, peak_memory, print_memory
 from miles.utils.object_store import StoreObjectRef, ValueSpec
 from miles.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
 from miles.utils.replay_base import all_replay_managers, routing_replay_manager
@@ -89,7 +89,7 @@ from .optimizer_state_swap import OptimizerStateStash
 from .optimizer_utils import reset_optimizer_state
 from .parallel import verify_megatron_parallel_state
 from .replay_utils import register_replay_list_moe
-from .training_phase import start_new_optimizer_run
+from .training_phase import set_phase, start_new_optimizer_run
 
 logging.getLogger("megatron").setLevel(logging.WARNING)
 
@@ -982,6 +982,55 @@ class MegatronTrainRayActor(TrainRayActor):
         self._assert_single_trainer("reset_optimizer_for_new_run")
         self._heartbeat.bump()
         return start_new_optimizer_run(self.optimizer, self.opt_param_scheduler)
+
+    @with_logs
+    @timer
+    def set_phase(self, args_overrides: dict, scheduler: dict, reset_optimizer: bool) -> dict:
+        """Switch this trainer to another objective / LR and weight-decay schedule in place, optionally
+        with a fresh optimizer history; see training_phase.set_phase."""
+        self._assert_single_trainer("set_phase")
+        self._heartbeat.bump()
+        return set_phase(
+            self.args,
+            self.optimizer,
+            self.opt_param_scheduler,
+            args_overrides=args_overrides or {},
+            scheduler_fields=scheduler or {},
+            reset_optimizer=reset_optimizer,
+        )
+
+    def probe_logprobs(self, data_path: str) -> list | None:
+        """Teacher-forced log-probs of a fixed probe set (sft_validation.probe_token_logprobs). A
+        measurement only: a failure is returned as ``{"error": ...}`` rather than killing the cell."""
+        from miles.backends.megatron_utils.sft_validation import probe_token_logprobs
+
+        self._heartbeat.bump()
+        try:
+            return probe_token_logprobs(self.args, self.model, data_path=data_path)
+        except Exception as error:  # noqa: BLE001
+            logger.exception("probe_logprobs failed")
+            return {"error": repr(error)[:500]}
+
+    def gpu_memory_peak(self, reset: bool = True) -> dict:
+        """This rank's peak allocated / reserved GPU memory (GiB) since the last reset."""
+        return peak_memory(reset=reset)
+
+    @with_logs
+    @timer
+    def save_training_state(self, iteration: int) -> None:
+        """Megatron checkpoint (model, distributed optimizer with fp32 main params and moments, LR
+        scheduler) to ``--save`` as ``iteration``, without the HF export that ``save_model`` adds."""
+        self._assert_single_trainer("save_training_state")
+        self._heartbeat.bump()
+        self._finalize_pending_async_save()
+        save(
+            iteration,
+            self.model,
+            self.optimizer,
+            self.opt_param_scheduler,
+            snapshot_publisher=self.snapshot_publisher,
+        )
+        self._finalize_pending_async_save()
 
     @with_logs
     @timer

@@ -448,6 +448,25 @@ class TrainerController:
         self._assert_one_cell("reset_optimizer_for_new_run")
         return await self._execute_first_alive("reset_optimizer_for_new_run")
 
+    async def set_phase(self, args_overrides: dict, scheduler: dict, reset_optimizer: bool) -> list:
+        """Switch objective and LR / weight-decay schedule in place; see megatron_utils/training_phase.py."""
+        self._assert_one_cell("set_phase")
+        return await self._execute_first_alive(
+            "set_phase", args_overrides=args_overrides, scheduler=scheduler, reset_optimizer=reset_optimizer
+        )
+
+    async def probe_logprobs(self, data_path: str) -> list:
+        self._assert_one_cell("probe_logprobs")
+        return await self._execute_first_alive("probe_logprobs", data_path=data_path)
+
+    async def gpu_memory_peak(self, reset: bool = True) -> list:
+        return await self._execute_first_alive("gpu_memory_peak", reset=reset)
+
+    async def save_training_state(self, iteration: int) -> list:
+        """Megatron checkpoint with optimizer state to --save, without the HF export."""
+        self._assert_one_cell("save_training_state")
+        return await self._execute_first_alive("save_training_state", iteration=iteration)
+
     async def swap_optimizer_state(self, stash_as: str, load: str) -> list:
         """Stash the active optimizer history as ``stash_as`` and activate ``load``; see optimizer_state_swap."""
         self._assert_one_cell("swap_optimizer_state")
