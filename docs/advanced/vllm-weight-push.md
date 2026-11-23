@@ -8,13 +8,13 @@ miles' regular weight sync (`--update-weight-transfer-mode`) updates the SGLang 
 
 - Each vLLM server runs with `--weight-transfer-config '{"backend": "nccl"}'` and `VLLM_SERVER_DEV_MODE=1`, which exposes `/init_weight_transfer_engine`, `/start_weight_update`, `/update_weights`, `/finish_weight_update`, `/pause`, `/resume`, `/weight_info`, `/update_weight_version` and `/reset_prefix_cache`.
 - A copy of the serving image's `libnccl.so`, readable from the trainer nodes. NCCL refuses communicators whose ranks run different versions, and the trainer's torch usually links another one; the trainer loads this copy with ctypes.
-- `--save-hf` (any path): the push streams the same Megatron→HF weight iterator the HF export uses, so the tensor names are exactly the ones vLLM loads from disk. Nothing is written to that path unless the driver exports.
+- `--save-hf` (any path): the push streams the same Megatron→HF weight iterator the HF export uses, so the tensor names are exactly the ones vLLM loads from disk. Nothing is written there unless the driver saves or exports.
 - One trainer cell (no `--indep-dp`, no fault-tolerant spare cells).
 - `--distributed-timeout-minutes` longer than a push: while global rank 0 broadcasts, the other ranks wait in the iterator's gathers.
 
 ## Driver API
 
-A custom `--train-script` calls two methods on the trainer group returned by `create_training_models`:
+A custom driver script, run in place of `train.py`, calls two methods on the trainer group returned by `create_training_models` (see [Driving a long-lived trainer](/user-guide/trainer-control)):
 
 ```python
 connected = await actor.vllm_connect(

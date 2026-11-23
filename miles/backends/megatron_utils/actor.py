@@ -84,6 +84,7 @@ from .model import (
     train,
 )
 from .named_weights import named_params_and_buffers
+from .optimizer_state_swap import OptimizerStateStash
 from .optimizer_utils import reset_optimizer_state
 from .parallel import verify_megatron_parallel_state
 from .replay_utils import register_replay_list_moe
@@ -127,6 +128,7 @@ class MegatronTrainRayActor(TrainRayActor):
         self.weight_updater: WeightUpdater | None = None
         self.snapshot_publisher: SnapshotPublisher | None = None
         self.vllm_weight_updater = VllmWeightUpdater(self._iter_hf_export_weights)
+        self._optimizer_state_stash = OptimizerStateStash()
         monkey_patch_torch_dist()
 
         self._last_rollout_id: int | None = None
@@ -942,6 +944,37 @@ class MegatronTrainRayActor(TrainRayActor):
         every rank streams the HF export, global rank 0 broadcasts and answers)."""
         self._heartbeat.bump()
         return self.vllm_weight_updater.push(version)
+
+    @with_logs
+    @timer
+    def swap_optimizer_state(self, stash_as: str, load: str) -> dict:
+        """Keep several optimizer histories on one model: stash the active one in host memory as
+        ``stash_as`` and make ``load`` active (restored, or fresh the first time)."""
+        self._assert_single_trainer("swap_optimizer_state")
+        self._heartbeat.bump()
+        out = self._optimizer_state_stash.swap(self.optimizer, stash_as=stash_as, load=load)
+        return dict(out, cpu_states=self._optimizer_state_stash.names)
+
+    @staticmethod
+    def _stashed_optimizer_states_path(directory: str) -> str:
+        return f"{directory}/stashed-optimizer-rank{dist.get_rank():05d}.pt"
+
+    def save_stashed_optimizer_states(self, directory: str) -> dict:
+        """Write this rank's stashed optimizer histories into ``directory`` (collective); with a Megatron
+        checkpoint of the active one, a restart can resume every history."""
+        self._heartbeat.bump()
+        out = self._optimizer_state_stash.save(self._stashed_optimizer_states_path(directory))
+        dist.barrier(group=get_gloo_group())
+        return out
+
+    def load_stashed_optimizer_states(self, directory: str) -> dict:
+        """Read the histories ``save_stashed_optimizer_states`` wrote; a directory without them is a no-op."""
+        self._heartbeat.bump()
+        path = self._stashed_optimizer_states_path(directory)
+        if not os.path.exists(path):
+            return {"states": []}
+        self._optimizer_state_stash.load(path)
+        return {"states": self._optimizer_state_stash.names}
 
     def _named_actor_weights(self, *, translate_gpu_to_cpu: bool = False, include_model_companion: bool = False):
         return named_params_and_buffers(

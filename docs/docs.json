@@ -62,6 +62,7 @@
        "user-guide/judged-training",
        "user-guide/monitoring",
        "user-guide/customization",
+       "user-guide/trainer-control",
        "user-guide/generate-endpoint",
        "user-guide/agentic-rollout",
        {

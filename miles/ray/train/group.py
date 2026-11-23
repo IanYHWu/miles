@@ -428,6 +428,19 @@ class TrainerController:
         self._assert_one_cell("vllm_push")
         return await self._execute_first_alive("vllm_push", version=version)
 
+    async def swap_optimizer_state(self, stash_as: str, load: str) -> list:
+        """Stash the active optimizer history as ``stash_as`` and activate ``load``; see optimizer_state_swap."""
+        self._assert_one_cell("swap_optimizer_state")
+        return await self._execute_first_alive("swap_optimizer_state", stash_as=stash_as, load=load)
+
+    async def save_stashed_optimizer_states(self, directory: str) -> list:
+        self._assert_one_cell("save_stashed_optimizer_states")
+        return await self._execute_first_alive("save_stashed_optimizer_states", directory=directory)
+
+    async def load_stashed_optimizer_states(self, directory: str) -> list:
+        self._assert_one_cell("load_stashed_optimizer_states")
+        return await self._execute_first_alive("load_stashed_optimizer_states", directory=directory)
+
     async def update_weights(self, info: UpdatableEngines, rollout_id: int | None = None) -> int | None:
         """Broadcast weights to rollout engines and answer the version they now serve."""
         log_structured(logger.info, tag="ft", op="update_weights", phase="start", rollout=rollout_id)
