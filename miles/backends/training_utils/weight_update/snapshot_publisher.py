@@ -1,7 +1,7 @@
 import json
 import logging
 import shutil
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import safetensors.torch
@@ -58,6 +58,10 @@ class SnapshotPublisher:
             (path / "adapter_config.json").write_text(json.dumps(adapter_config))
             (path / "adapter_model.safetensors").write_bytes(adapter_bytes)
 
+    def iter_hf_weights(self, weights: Mapping[str, torch.Tensor]) -> Iterator[list[tuple[str, torch.Tensor]]]:
+        """Collectively yield the HF-named batches of a full export; every rank must consume them all."""
+        return self._iterator.iter_hf_weights(weights)
+
     def write_model(self, path: str | Path, *, weights: Mapping[str, torch.Tensor], hf_checkpoint: str) -> None:
         """Collectively write HF model shards into the caller's checkpoint directory."""
         path = Path(path)
@@ -67,7 +71,7 @@ class SnapshotPublisher:
         total_size = 0
         shard_index = 0
         write_error = None
-        for hf_named_tensors in self._iterator.iter_hf_weights(weights):
+        for hf_named_tensors in self.iter_hf_weights(weights):
             if not is_writer or write_error is not None:
                 continue
             shard_index += 1

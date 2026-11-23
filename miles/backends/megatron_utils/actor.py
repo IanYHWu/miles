@@ -10,7 +10,7 @@ import torch.distributed as dist
 from megatron.training.async_utils import maybe_finalize_async_save
 from torch_memory_saver import torch_memory_saver
 
-from miles.backends.megatron_utils.hf_export import save_hf_model
+from miles.backends.megatron_utils.hf_export import iter_hf_export_weights, save_hf_model
 from miles.backends.megatron_utils.lora.utils import is_lora_enabled, lora_rollout_enabled
 from miles.backends.megatron_utils.megatron_to_hf import converter_model_name
 from miles.backends.megatron_utils.rematerialize_utils import build_main_cast_context
@@ -39,6 +39,7 @@ from miles.backends.training_utils.types import TrainStepOutput
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.backends.training_utils.weight_update.snapshot_publisher import SnapshotPublisher
 from miles.backends.training_utils.weight_update.updater import WeightUpdater
+from miles.backends.training_utils.weight_update.vllm_nccl.updater import VllmWeightUpdater
 from miles.dashboard import hooks as dashboard_hooks
 from miles.ray.rollout.inference_controller import UpdatableEngines
 from miles.ray.specs.train import compute_trainer_pool_id
@@ -125,6 +126,7 @@ class MegatronTrainRayActor(TrainRayActor):
     ) -> int | None:
         self.weight_updater: WeightUpdater | None = None
         self.snapshot_publisher: SnapshotPublisher | None = None
+        self.vllm_weight_updater = VllmWeightUpdater(self._iter_hf_export_weights)
         monkey_patch_torch_dist()
 
         self._last_rollout_id: int | None = None
@@ -895,6 +897,51 @@ class MegatronTrainRayActor(TrainRayActor):
         save_hf_model(
             self.args, rollout_id, self.model, publisher=self.snapshot_publisher, path=path, raise_on_error=True
         )
+
+    def _assert_single_trainer(self, what: str) -> None:
+        # These operations act on one Megatron instance: independent DP replicas would each act on
+        # (and, for persistence, write or read) only their own copy.
+        assert not self.args.indep_dp, f"{what} does not support --indep-dp"
+
+    def _iter_hf_export_weights(self):
+        assert self.snapshot_publisher is not None, "the vLLM weight push streams the HF export (needs --save-hf)"
+        return iter_hf_export_weights(self.args, self.model, publisher=self.snapshot_publisher)
+
+    @with_logs
+    @timer
+    def vllm_connect(
+        self,
+        engines: list[dict],
+        nccl_so: str,
+        http_timeout: float = 300.0,
+        connect_timeout: float = 600.0,
+        extra_ranks: int = 0,
+        push_timeout: float = 900.0,
+        test_batch_delay: float = 0.0,
+    ) -> dict | None:
+        """Open the NCCL weight-transfer link to externally run vLLM servers (global rank 0 answers).
+
+        ``engines`` are ``{"url", "world_size"}`` entries; ``nccl_so`` is the serving image's libnccl.
+        Failures are returned as ``{"ok": False, ...}``. See weight_update/vllm_nccl."""
+        self._assert_single_trainer("vllm_connect")
+        self._heartbeat.bump()
+        return self.vllm_weight_updater.connect(
+            engines,
+            nccl_so,
+            http_timeout=http_timeout,
+            connect_timeout=connect_timeout,
+            push_timeout=push_timeout,
+            extra_ranks=extra_ranks,
+            test_batch_delay=test_batch_delay,
+        )
+
+    @with_logs
+    @timer
+    def vllm_push(self, version: str) -> dict | None:
+        """Send the current weights to the connected vLLM servers and publish ``version`` (collective:
+        every rank streams the HF export, global rank 0 broadcasts and answers)."""
+        self._heartbeat.bump()
+        return self.vllm_weight_updater.push(version)
 
     def _named_actor_weights(self, *, translate_gpu_to_cpu: bool = False, include_model_companion: bool = False):
         return named_params_and_buffers(

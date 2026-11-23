@@ -395,6 +395,39 @@ class TrainerController:
         )
         return results[0]
 
+    def _assert_one_cell(self, what: str) -> None:
+        # These operations act on one Megatron instance; with several trainer cells (fault
+        # tolerance, --indep-dp) only the first would perform them.
+        assert len(self._cells) == 1, f"{what} needs exactly one trainer cell, found {len(self._cells)}"
+
+    async def vllm_connect(
+        self,
+        engines: list[dict],
+        nccl_so: str,
+        http_timeout: float = 300.0,
+        connect_timeout: float = 600.0,
+        extra_ranks: int = 0,
+        push_timeout: float = 900.0,
+        test_batch_delay: float = 0.0,
+    ) -> list:
+        """Open the NCCL weight-transfer link to externally run vLLM servers; see docs/advanced/vllm-weight-push.md."""
+        self._assert_one_cell("vllm_connect")
+        return await self._execute_first_alive(
+            "vllm_connect",
+            engines=engines,
+            nccl_so=nccl_so,
+            http_timeout=http_timeout,
+            connect_timeout=connect_timeout,
+            extra_ranks=extra_ranks,
+            push_timeout=push_timeout,
+            test_batch_delay=test_batch_delay,
+        )
+
+    async def vllm_push(self, version: str) -> list:
+        """Push the current weights to the connected vLLM servers as ``version`` (per-rank results)."""
+        self._assert_one_cell("vllm_push")
+        return await self._execute_first_alive("vllm_push", version=version)
+
     async def update_weights(self, info: UpdatableEngines, rollout_id: int | None = None) -> int | None:
         """Broadcast weights to rollout engines and answer the version they now serve."""
         log_structured(logger.info, tag="ft", op="update_weights", phase="start", rollout=rollout_id)

@@ -29,6 +29,15 @@ def _get_hf_bridge(hf_checkpoint: str):
     return AutoBridge.from_hf_pretrained(hf_checkpoint, trust_remote_code=True)
 
 
+def iter_hf_export_weights(args, model: Sequence[DDP], *, publisher: SnapshotPublisher):
+    """Collectively yield the HF-named weight batches of a raw-mode export (LoRA merged into the base).
+
+    Consumers other than the checkpoint writer (e.g. the vLLM weight push) get exactly the tensors
+    and names the exported checkpoint holds. Every rank must consume the whole stream."""
+    weights = dict(named_params_and_buffers(args, model, convert_to_global_name=True))
+    return publisher.iter_hf_weights(merge_lora_into_weights(model, weights) if is_lora_model(model) else weights)
+
+
 def save_hf_model(
     args,
     rollout_id: int,
