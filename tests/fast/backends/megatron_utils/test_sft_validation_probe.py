@@ -35,3 +35,13 @@ def test_invalid_rows_are_rejected(tmp_path, row):
 def test_an_empty_probe_set_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="empty"):
         _read_probe_rows(_write(tmp_path, []))
+
+
+def test_the_probe_error_result_crosses_the_rpc_wire():
+    """A failed probe answers {"error": ...}; under --worker-comm-backend rpc the result annotation must allow it."""
+    from miles.backends.megatron_utils.actor import MegatronTrainRayActor
+    from miles.utils.workers.rpc.common.metadata import collect_rpc_method_specs
+
+    serializer = collect_rpc_method_specs(MegatronTrainRayActor)["probe_logprobs"].serializer
+    for result in ({"error": "RuntimeError('x')"}, [[-0.5, -1.0]], None):
+        assert serializer.decode_result(serializer.encode_result(result)) == result

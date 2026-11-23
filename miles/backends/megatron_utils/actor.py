@@ -999,7 +999,7 @@ class MegatronTrainRayActor(TrainRayActor):
             reset_optimizer=reset_optimizer,
         )
 
-    def probe_logprobs(self, data_path: str) -> list | None:
+    def probe_logprobs(self, data_path: str) -> list[list[float]] | dict[str, str] | None:
         """Teacher-forced log-probs of a fixed probe set (sft_validation.probe_token_logprobs). A
         measurement only: a failure is returned as ``{"error": ...}`` rather than killing the cell."""
         from miles.backends.megatron_utils.sft_validation import probe_token_logprobs
