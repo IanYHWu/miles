@@ -185,6 +185,28 @@ W&B is enabled when `WANDB_API_KEY` is present, except in smoke mode. Set
 The recipe retains the standard naming helper while removing its credential from
 argv; authentication uses the inherited environment.
 
+## Trainer-only entrypoints
+
+An application with its own trainer-only launcher (a script that imports Miles and
+calls `execute_train`, typically with its own driver as the training script) can use
+the same container, PBS bootstrap and job-local Ray cluster:
+
+```bash
+python3 tools/abci/launch.py --recipe trainer --mode train \
+  --entrypoint /abs/path/run_my_trainer.py --run-config /abs/path/run.json \
+  --repo "$MILES_REPO" --image "$MILES_IMAGE" --scratch "$SCRATCH" \
+  --container-root "$MILES_CONTAINER_ROOT" --private-pythonpath /abs/path/my_project \
+  --actor-nodes 2 --checkpoint-dir /groups/.../checkpoints
+```
+
+The head runs `python ENTRYPOINT --run-config RUN_CONFIG` from the Miles checkout,
+with the checkout and `--private-pythonpath` on `PYTHONPATH`. The allocation is the
+actor nodes only (`--rollout-nodes` is ignored); there is no judge preflight, and
+`--model-dir`, `--data-dir` and `--judge-config` are not needed. The entrypoint and run
+config must be absolute paths; directories outside `/home`, `/groups` and the scratch
+directory are bound read-only. The container gets a private home under
+`SCRATCH/home`, mounted at `/tmp/miles-home`, for caches the entrypoint writes.
+
 ## Algorithm and resume notes
 
 Fully async uses `in_place` pause with namespaced prefix caching. Its integer

@@ -249,3 +249,67 @@ def test_train_forwards_dp_attention_capacity_and_initial_verification(monkeypat
         if name.startswith("rollout-"):
             assert recipe[recipe.index("--" + name) + 1] == options[name]
     assert "--check-initial-weights" in recipe
+
+
+def _trainer_args(tmp_path, *extra, entrypoint=None, run_config=None):
+    staged = tmp_path / "staged"
+    staged.mkdir(exist_ok=True)
+    for name in ("launcher.py", "run.json"):
+        (staged / name).write_text("")
+    argv = [
+        "--recipe", "trainer", "--image", str(tmp_path), "--repo", str(tmp_path), "--scratch", str(tmp_path / "scratch"),
+        "--entrypoint", str(entrypoint or staged / "launcher.py"), "--run-config", str(run_config or staged / "run.json"),
+    ]  # fmt: skip
+    return launch._parser().parse_args(argv + list(extra))
+
+
+def test_the_trainer_recipe_runs_its_entrypoint_without_the_judge_preflight(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(launch, "_run", calls.append)
+    args = _trainer_args(tmp_path, "--mode", "train")
+    launch._preflight(args)
+    assert calls == []  # no judge preflight, and no judge inputs needed
+    launch._execute_recipe(args)
+    assert calls == [[launch.sys.executable, args.entrypoint, "--run-config", args.run_config]]
+
+
+@pytest.mark.parametrize("missing", ["entrypoint", "run_config"])
+def test_the_trainer_recipe_needs_absolute_staged_files(tmp_path, missing):
+    args = _trainer_args(tmp_path, **{missing: tmp_path / "absent"})
+    with pytest.raises(SystemExit, match="absolute, staged --" + missing.replace("_", "-")):
+        launch._preflight(args)
+    relative = _trainer_args(tmp_path, **{missing: "staged/relative.py"})
+    with pytest.raises(SystemExit, match="absolute"):
+        launch._preflight(relative)
+
+
+def _host_command(monkeypatch, tmp_path, args, nodes):
+    nodefile = tmp_path / "nodes"
+    nodefile.write_text("".join(f"node{i}\n" for i in range(nodes)))
+    monkeypatch.setenv("PBS_JOBID", "789.pbs")
+    monkeypatch.setenv("PBS_NODEFILE", str(nodefile))
+    monkeypatch.setattr(launch.socket, "gethostbyname", lambda _: "10.0.0.1")
+    monkeypatch.setattr(launch.subprocess, "Popen", lambda command: Mock())
+    head = Mock()
+    monkeypatch.setattr(launch, "_run_head", head)
+    launch._host(args)
+    return head.call_args.args[0]
+
+
+def test_the_trainer_recipe_allocates_actor_nodes_with_a_private_home(monkeypatch, tmp_path):
+    args = _trainer_args(tmp_path, "--mode", "train", "--actor-nodes", "2", "--rollout-nodes", "0")
+    command = _host_command(monkeypatch, tmp_path, args, nodes=2)
+    assert "--no-home" not in command
+    assert command[command.index("--home") + 1] == f"{tmp_path}/scratch/home:/tmp/miles-home"
+    # staged outside /home, /groups and scratch (pytest's tmp_path): bound read-only
+    staged = tmp_path / "staged"
+    if not staged.is_relative_to("/home"):
+        assert f"{staged}:{staged}:ro" in command
+    with pytest.raises(SystemExit, match="requires 2 node"):
+        _host_command(monkeypatch, tmp_path, args, nodes=3)
+
+
+def test_the_judge_recipe_still_requires_its_inputs(monkeypatch, tmp_path):
+    args = launch._parser().parse_args(["--image", str(tmp_path), "--repo", str(tmp_path), "--scratch", str(tmp_path)])
+    with pytest.raises(SystemExit, match="--model-dir, --data-dir, --judge-config"):
+        _host_command(monkeypatch, tmp_path, args, nodes=1)

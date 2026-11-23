@@ -2,6 +2,9 @@
 
 No job is submitted by this command. Use --mode smoke for short synthetic-reward
 updates; --mode train must be selected explicitly for real judge-scored training.
+--recipe trainer instead runs an external trainer-only entrypoint (an application's
+own launcher script, which imports Miles) on the actor nodes: no rollout nodes and
+no judge preflight.
 Runtime outputs belong under --scratch; --checkpoint-dir may use separate group storage.
 Credentials never appear in argv.
 """
@@ -15,12 +18,20 @@ import sys
 import time
 from pathlib import Path
 
+# Staged inputs of the judged recipe; the trainer recipe's entrypoint owns its own.
+JUDGE_INPUTS = ("model_dir", "data_dir", "judge_config")
+
 
 def _parser():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--recipe", choices=["judge", "trainer"], default="judge")
     p.add_argument("--mode", choices=["preflight", "smoke", "async-smoke", "train"], default="preflight")
-    for name in ("image", "repo", "scratch", "model-dir", "data-dir", "judge-config"):
+    for name in ("image", "repo", "scratch"):
         p.add_argument("--" + name, required=True)
+    for name in JUDGE_INPUTS:
+        p.add_argument("--" + name.replace("_", "-"), default="", help="judge recipe: required")
+    p.add_argument("--entrypoint", default="", help="trainer recipe: absolute path of the script to run")
+    p.add_argument("--run-config", default="", help="trainer recipe: absolute path passed as --run-config")
     p.add_argument("--private-pythonpath", default="")
     p.add_argument("--container-root", default="", help="Readable extracted /root from the same pinned image")
     p.add_argument("--model-name", choices=["Qwen3.5-9B", "Qwen3.5-122B-A10B"], default="Qwen3.5-9B")
@@ -88,7 +99,17 @@ def _credentials(path):
             os.environ[labels[label.strip().lower()]] = value.strip()
 
 
+def _trainer_inputs(args):
+    for flag, path in (("--entrypoint", args.entrypoint), ("--run-config", args.run_config)):
+        if not path or not Path(path).is_absolute() or not Path(path).is_file():
+            raise SystemExit(f"--recipe trainer requires an absolute, staged {flag}")
+    return [args.entrypoint, args.run_config]
+
+
 def _preflight(args):
+    if args.recipe == "trainer":
+        _trainer_inputs(args)
+        return
     command = [
         sys.executable,
         "tools/abci/preflight.py",
@@ -107,6 +128,9 @@ def _preflight(args):
 
 
 def _execute_recipe(args):
+    if args.recipe == "trainer":
+        _run([sys.executable, args.entrypoint, "--run-config", args.run_config])
+        return
     run_id = "pbs-" + os.environ["PBS_JOBID"].split(".")[0] + "-" + args.model_name
     run_dir = Path(args.scratch) / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -336,12 +360,21 @@ def _host(args):
         raise SystemExit("Run inside a PBS allocation; never launch GPU workloads on a login node")
     slots = Path(nodefile).read_text().split()
     nodes = list(dict.fromkeys(slots))
-    if min(args.actor_nodes, args.rollout_nodes, args.num_rollout) < 1:
-        raise SystemExit("actor-nodes, rollout-nodes and num-rollout must be positive")
-    expected = args.actor_nodes + args.rollout_nodes if args.mode == "train" else 1
+    trainer = args.recipe == "trainer"
+    if trainer:
+        if args.actor_nodes < 1:
+            raise SystemExit("actor-nodes must be positive")
+        expected, inputs = args.actor_nodes, _trainer_inputs(args)
+    else:
+        if min(args.actor_nodes, args.rollout_nodes, args.num_rollout) < 1:
+            raise SystemExit("actor-nodes, rollout-nodes and num-rollout must be positive")
+        expected = args.actor_nodes + args.rollout_nodes if args.mode == "train" else 1
+        if missing := [name for name in JUDGE_INPUTS if not getattr(args, name)]:
+            raise SystemExit("The judge recipe requires " + ", ".join("--" + n.replace("_", "-") for n in missing))
+        inputs = [getattr(args, name) for name in JUDGE_INPUTS]
     if len(nodes) != expected:
         raise SystemExit(f"{args.mode} requires {expected} node(s), found {len(nodes)}")
-    for path in (args.image, args.repo, args.model_dir, args.data_dir, args.judge_config):
+    for path in (args.image, args.repo, *inputs):
         if not Path(path).exists():
             raise SystemExit(f"Missing staged input: {path}")
     if args.container_root and not (Path(args.container_root) / "Megatron-LM").is_dir():
@@ -365,6 +398,17 @@ def _host(args):
         "--env",
         "PBS_JOBID=" + os.environ["PBS_JOBID"],
     ]
+    bound = [Path("/home"), Path("/groups"), Path(args.scratch)]
+    if trainer:
+        # Trainer entrypoints may write caches under $HOME: give them a private one in scratch.
+        container_home = Path(args.scratch) / "home"
+        container_home.mkdir(parents=True, exist_ok=True)
+        offset = command.index("--no-home")
+        command[offset : offset + 1] = ["--home", f"{container_home}:/tmp/miles-home"]
+        # Make the entrypoint and run config readable wherever they are staged.
+        for directory in dict.fromkeys(Path(path).parent for path in inputs):
+            if not any(directory.is_relative_to(root) for root in bound):
+                command += ["--bind", f"{directory}:{directory}:ro"]
     if args.checkpoint_dir:
         checkpoint = Path(args.checkpoint_dir)
         if not checkpoint.is_absolute():
