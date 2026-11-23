@@ -313,3 +313,18 @@ def test_the_judge_recipe_still_requires_its_inputs(monkeypatch, tmp_path):
     args = launch._parser().parse_args(["--image", str(tmp_path), "--repo", str(tmp_path), "--scratch", str(tmp_path)])
     with pytest.raises(SystemExit, match="--model-dir, --data-dir, --judge-config"):
         _host_command(monkeypatch, tmp_path, args, nodes=1)
+
+
+def test_kernel_caches_are_node_local_and_other_caches_stay_in_scratch(monkeypatch, tmp_path):
+    args = _trainer_args(tmp_path)  # preflight mode: no Ray
+    environ = {"PBS_JOBID": "789.pbs"}
+    monkeypatch.setattr(launch.os, "environ", environ)
+    monkeypatch.chdir(tmp_path)
+    launch._container_role(args)
+    for name, leaf in (
+        ("TRITON_CACHE_DIR", "triton"),
+        ("TORCHINDUCTOR_CACHE_DIR", "inductor"),
+        ("CUDA_CACHE_PATH", "cuda"),
+    ):
+        assert environ[name] == f"/tmp/miles-789.pbs/{leaf}"
+    assert environ["HF_HOME"] == f"{tmp_path}/scratch/hf"

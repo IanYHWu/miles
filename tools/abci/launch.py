@@ -276,6 +276,7 @@ def _verify_training_resume(args, argv, run_dir):
 
 def _container_role(args):
     _credentials(args.credentials_file)
+    node_cache = "/tmp/miles-" + os.environ.get("PBS_JOBID", "local")
     os.environ.update(
         {
             "HF_HUB_OFFLINE": "1",
@@ -292,9 +293,10 @@ def _container_role(args):
             "WANDB_DATA_DIR": args.scratch + "/wandb-data",
             "RAY_USAGE_STATS_CONFIG_PATH": args.scratch + "/ray-usage.json",
             "HF_HOME": args.scratch + "/hf",
-            "TRITON_CACHE_DIR": args.scratch + "/triton",
-            "TORCHINDUCTOR_CACHE_DIR": args.scratch + "/inductor",
-            "CUDA_CACHE_PATH": args.scratch + "/cuda",
+            # Kernel caches stay node-local: concurrent writers on several nodes race on a shared Lustre cache.
+            "TRITON_CACHE_DIR": node_cache + "/triton",
+            "TORCHINDUCTOR_CACHE_DIR": node_cache + "/inductor",
+            "CUDA_CACHE_PATH": node_cache + "/cuda",
             "XDG_CACHE_HOME": args.scratch + "/cache",
             "SGLANG_CACHE_DIR": args.scratch + "/sglang",
             "FLASHINFER_WORKSPACE_BASE": args.scratch + "/flashinfer",
