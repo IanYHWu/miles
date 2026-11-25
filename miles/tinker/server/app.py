@@ -89,7 +89,10 @@ def build_app(service: TinkerService) -> FastAPI:
     @app.post("/api/v1/get_server_capabilities")
     @app.get("/api/v1/get_server_capabilities")
     async def get_server_capabilities():
-        return {"supported_models": [{"model_name": service.config.base_model, "trainable": True, "sampleable": True}]}
+        trainable = service.config.train_mode != "none"
+        return {
+            "supported_models": [{"model_name": service.config.base_model, "trainable": trainable, "sampleable": True}]
+        }
 
     @app.post("/api/v1/create_model")
     async def create_model(request: Request):

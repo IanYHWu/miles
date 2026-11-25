@@ -46,13 +46,76 @@ def _build_train_data(slot_datums: list, *, with_adapter_slots: bool) -> dict:
     return train_data
 
 
-class MilesBackend:
+class SamplingBackend:
+    """Samples the engines behind the router; trains nothing."""
+
+    def __init__(self, router_url: str) -> None:
+        self.router_url = router_url
+
+    async def sample(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
+        request = self._generate_request(payload, lora_name, lora_path)
+        try:
+            responses = await asyncio.gather(
+                *[
+                    post(f"{self.router_url}/generate", _with_sample_seed(request, index))
+                    for index in range(payload["num_samples"])
+                ]
+            )
+        except httpx.HTTPError as error:
+            return {"error": str(error)}
+        sequences = [_to_sequence(response) for response in responses]
+        for sequence in sequences:
+            if "error" in sequence:
+                return sequence
+        result = {"sequences": sequences}
+        if payload["prompt_logprobs"]:
+            result["prompt_logprobs"] = _prompt_logprobs(responses[0])
+        if payload["topk_prompt_logprobs"]:
+            result["topk_prompt_logprobs"] = _topk_prompt_logprobs(responses[0], payload["topk_prompt_logprobs"])
+        return result
+
+    def _generate_request(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
+        params = payload["sampling_params"]
+        max_tokens = params.get("max_tokens")
+        if max_tokens is None:
+            raise UserInputError("sampling_params.max_tokens is required")
+        sampling_params = {
+            "max_new_tokens": max_tokens,
+            "temperature": params.get("temperature", 1.0),
+            "top_p": params.get("top_p", 1.0),
+            "top_k": params.get("top_k", -1),
+        }
+        if params.get("seed") is not None:
+            sampling_params["sampling_seed"] = params["seed"]
+        stop = params.get("stop")
+        if stop is not None:
+            if stop == []:
+                # tinker defines stop=[] as disabling every stop token, EOS included
+                sampling_params["ignore_eos"] = True
+            elif isinstance(stop, list) and isinstance(stop[0], int):
+                sampling_params["stop_token_ids"] = stop
+            else:
+                sampling_params["stop"] = stop
+        request = {"input_ids": payload["prompt_tokens"], "sampling_params": sampling_params, "return_logprob": True}
+        if payload["prompt_logprobs"] or payload["topk_prompt_logprobs"]:
+            request["logprob_start_len"] = 0
+        if payload["topk_prompt_logprobs"]:
+            request["top_logprobs_num"] = payload["topk_prompt_logprobs"]
+        if lora_name is not None:
+            request["lora_path"] = lora_name
+            if lora_path is not None:
+                # request-carried backfill source: the engine refills an evicted version itself
+                request["lora_backfill_paths"] = {lora_name: lora_path}
+        return request
+
+
+class MilesBackend(SamplingBackend):
     # the trainer routes each datum to its model's adapter slot
     with_adapter_slots = True
 
     def __init__(self, trainer, router_url: str, dp_size: int = 1) -> None:
+        super().__init__(router_url)
         self.trainer = trainer
-        self.router_url = router_url
         self.dp_size = dp_size
 
     async def trainer_dead(self) -> bool:
@@ -121,64 +184,6 @@ class MilesBackend:
         return _slot_failure(
             await self.trainer.export_slot(slot=slot, rank=rank, alpha=alpha, path=path, metadata=metadata)
         )
-
-    # -------- sampling --------
-
-    async def sample(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
-        request = self._generate_request(payload, lora_name, lora_path)
-        try:
-            responses = await asyncio.gather(
-                *[
-                    post(f"{self.router_url}/generate", _with_sample_seed(request, index))
-                    for index in range(payload["num_samples"])
-                ]
-            )
-        except httpx.HTTPError as error:
-            return {"error": str(error)}
-        sequences = [_to_sequence(response) for response in responses]
-        for sequence in sequences:
-            if "error" in sequence:
-                return sequence
-        result = {"sequences": sequences}
-        if payload["prompt_logprobs"]:
-            result["prompt_logprobs"] = _prompt_logprobs(responses[0])
-        if payload["topk_prompt_logprobs"]:
-            result["topk_prompt_logprobs"] = _topk_prompt_logprobs(responses[0], payload["topk_prompt_logprobs"])
-        return result
-
-    def _generate_request(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
-        params = payload["sampling_params"]
-        max_tokens = params.get("max_tokens")
-        if max_tokens is None:
-            raise UserInputError("sampling_params.max_tokens is required")
-        sampling_params = {
-            "max_new_tokens": max_tokens,
-            "temperature": params.get("temperature", 1.0),
-            "top_p": params.get("top_p", 1.0),
-            "top_k": params.get("top_k", -1),
-        }
-        if params.get("seed") is not None:
-            sampling_params["sampling_seed"] = params["seed"]
-        stop = params.get("stop")
-        if stop is not None:
-            if stop == []:
-                # tinker defines stop=[] as disabling every stop token, EOS included
-                sampling_params["ignore_eos"] = True
-            elif isinstance(stop, list) and isinstance(stop[0], int):
-                sampling_params["stop_token_ids"] = stop
-            else:
-                sampling_params["stop"] = stop
-        request = {"input_ids": payload["prompt_tokens"], "sampling_params": sampling_params, "return_logprob": True}
-        if payload["prompt_logprobs"] or payload["topk_prompt_logprobs"]:
-            request["logprob_start_len"] = 0
-        if payload["topk_prompt_logprobs"]:
-            request["top_logprobs_num"] = payload["topk_prompt_logprobs"]
-        if lora_name is not None:
-            request["lora_path"] = lora_name
-            if lora_path is not None:
-                # request-carried backfill source: the engine refills an evicted version itself
-                request["lora_backfill_paths"] = {lora_name: lora_path}
-        return request
 
 
 class FullFinetuneBackend(MilesBackend):

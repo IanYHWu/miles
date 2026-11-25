@@ -137,6 +137,8 @@ class TinkerService:
         base_model = payload["base_model"]
         if base_model != self.config.base_model:
             raise UserInputError(f"this gateway serves {self.config.base_model!r}, not {base_model!r}")
+        if self.config.train_mode == "none":
+            raise UserInputError("this gateway trains nothing; it only samples the base model")
         rank, alpha = self._adapter_shape(payload.get("lora_config") or {})
         if not self.free_slots:
             if self.config.train_mode == "full":
@@ -491,6 +493,8 @@ class TinkerService:
                 sampling_session.samples_by_seq[seq_id] = (request_id, sequence_ids)
                 return request_id, sequence_ids
         validate_sample_payload(payload, self.config)
+        if self.config.train_mode == "none" and model_path:
+            raise UserInputError(f"this gateway trains nothing and samples only the base model, not {model_path!r}")
         if self.config.train_mode == "full":
             self._check_served(model_path)
         lora_name, lora_path = (

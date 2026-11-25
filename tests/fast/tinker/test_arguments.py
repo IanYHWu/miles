@@ -1,4 +1,5 @@
-"""Full fine-tuning refuses at startup what its gradient window and per-model optimizer reset cannot honor."""
+"""Full fine-tuning refuses at startup what its gradient window and per-model optimizer reset cannot honor, and a
+gateway that trains nothing takes miles' rollout-only layout."""
 
 from argparse import Namespace
 
@@ -117,3 +118,19 @@ def test_full_finetune_names_every_unsupported_option(flag):
 def test_full_finetune_names_unsupported_values(overrides, name):
     with pytest.raises(ValueError, match=name):
         configure_tinker_args(_full_finetune_args(**overrides))
+
+
+def test_a_gateway_that_trains_nothing_takes_the_rollout_only_layout():
+    args = _full_finetune_args(tinker_train_mode="none")
+    configure_tinker_args(args)
+    assert args.debug_rollout_only and not hasattr(args, "tinker_lora_groups")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [dict(multi_lora_n_adapters=4), dict(lora_rank=16), dict(target_modules="attn")],
+    ids=["adapter-slots", "lora-rank", "target-modules"],
+)
+def test_a_gateway_that_trains_nothing_refuses_adapter_settings(overrides):
+    with pytest.raises(AssertionError, match="samples only the base model"):
+        configure_tinker_args(_full_finetune_args(tinker_train_mode="none", **overrides))

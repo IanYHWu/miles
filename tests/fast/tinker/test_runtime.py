@@ -10,6 +10,7 @@ from miles.tinker.core.types import UserInputError
 from miles.tinker.runtime import (
     FullFinetuneBackend,
     MilesBackend,
+    SamplingBackend,
     _build_train_data,
     _pad_to_dp_multiple,
     _prompt_logprobs,
@@ -79,7 +80,7 @@ class TestGenerateRequest:
             "topk_prompt_logprobs": 0,
             **payload_extra,
         }
-        return MilesBackend(None, "http://router")._generate_request(payload, lora_name="m@1")
+        return SamplingBackend("http://router")._generate_request(payload, lora_name="m@1")
 
     def test_max_tokens_is_required(self):
         with pytest.raises(UserInputError, match="max_tokens"):

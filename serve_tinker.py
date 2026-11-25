@@ -13,7 +13,7 @@ from miles.ray.wiring import get_backend_capability
 from miles.tinker.arguments import add_tinker_arguments, configure_tinker_args
 from miles.tinker.core.service import TinkerService
 from miles.tinker.core.types import GatewayConfig
-from miles.tinker.runtime import FullFinetuneBackend, MilesBackend
+from miles.tinker.runtime import FullFinetuneBackend, MilesBackend, SamplingBackend
 from miles.tinker.server.app import build_app
 from miles.utils.arguments import parse_args
 from miles.utils.async_utils import Disposer, with_disposer
@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 
 async def serve(args, *, disposer: Disposer):
-    full_finetune = args.tinker_train_mode == "full"
-    assert full_finetune or args.multi_lora, "--tinker-train-mode lora requires --multi-lora-n-adapters > 0"
+    train_mode = args.tinker_train_mode
+    assert train_mode != "lora" or args.multi_lora, "--tinker-train-mode lora requires --multi-lora-n-adapters > 0"
     assert args.load == args.hf_checkpoint, "Tinker trainers and engines must load the same frozen HF base"
     checkpoint_root = args.tinker_checkpoint_root or (args.save and f"{args.save}/tinker")
     assert checkpoint_root, "set --tinker-checkpoint-root (or --save to derive <save>/tinker)"
@@ -51,44 +51,18 @@ async def serve(args, *, disposer: Disposer):
     await inference_controller.init()
     disposer.add(inference_controller)
 
-    trainer_configs = compute_trainer_configs(args)
-    [actor_config] = [config for config in trainer_configs if config.role == ACTOR_ROLE]
-    trainer = create_trainer_handles(args, trainer_configs=trainer_configs)[actor_config.trainer_id]
-    await trainer.init(compute_trainer_args(args, actor_config))
-    disposer.add(trainer)
-
-    if full_finetune:
-        # Engines that take weight updates join the router only after a push, and the gateway serves the base model
-        # from the start, before any client has saved a sampler: push the trainer's base weights once.
-        await push_weights(trainer, inference_controller)
-        # one client at a time trains the served model's every weight
-        model_config = dict(train_mode="full", n_slots=1, trains_attn=True, trains_mlp=True, trains_unembed=True)
+    router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    if train_mode == "none":
+        # the engines serve the base model from the start, and no trainer stands behind them
+        backend, model_config = SamplingBackend(router_url), dict(train_mode="none", n_slots=0)
     else:
-        model_config = dict(
-            train_mode="lora",
-            n_slots=args.multi_lora_n_adapters,
-            lora_alpha=args.lora_alpha,
-            max_lora_rank=args.lora_rank,
-            trains_attn="attn" in args.tinker_lora_groups,
-            trains_mlp="mlp" in args.tinker_lora_groups,
-            trains_unembed="unembed" in args.tinker_lora_groups,
-        )
+        backend, model_config = await _training_backend(args, router_url, inference_controller, disposer=disposer)
     config = GatewayConfig(
         base_model=args.tinker_base_model or args.hf_checkpoint,
         checkpoint_root=checkpoint_root,
         vocab_size=hf_config.vocab_size,
         max_tokens_per_datum=max_tokens_per_datum,
         **model_config,
-    )
-    router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
-    actor_world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
-    dp_size = actor_world_size // (
-        args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
-    )
-    backend = (
-        FullFinetuneBackend(trainer, router_url, inference_controller, dp_size=dp_size)
-        if full_finetune
-        else MilesBackend(trainer, router_url, dp_size=dp_size)
     )
     service = TinkerService(backend, config)
 
@@ -111,6 +85,36 @@ async def serve(args, *, disposer: Disposer):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+
+
+async def _training_backend(args, router_url: str, inference_controller, *, disposer: Disposer) -> tuple:
+    """Start the trainer and return the backend that drives it, with what its models train."""
+    trainer_configs = compute_trainer_configs(args)
+    [actor_config] = [config for config in trainer_configs if config.role == ACTOR_ROLE]
+    trainer = create_trainer_handles(args, trainer_configs=trainer_configs)[actor_config.trainer_id]
+    await trainer.init(compute_trainer_args(args, actor_config))
+    disposer.add(trainer)
+    actor_world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+    dp_size = actor_world_size // (
+        args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
+    )
+    if args.tinker_train_mode == "full":
+        # Engines that take weight updates join the router only after a push, and the gateway serves the base model
+        # from the start, before any client has saved a sampler: push the trainer's base weights once.
+        await push_weights(trainer, inference_controller)
+        # one client at a time trains the served model's every weight
+        model_config = dict(train_mode="full", n_slots=1, trains_attn=True, trains_mlp=True, trains_unembed=True)
+        return FullFinetuneBackend(trainer, router_url, inference_controller, dp_size=dp_size), model_config
+    model_config = dict(
+        train_mode="lora",
+        n_slots=args.multi_lora_n_adapters,
+        lora_alpha=args.lora_alpha,
+        max_lora_rank=args.lora_rank,
+        trains_attn="attn" in args.tinker_lora_groups,
+        trains_mlp="mlp" in args.tinker_lora_groups,
+        trains_unembed="unembed" in args.tinker_lora_groups,
+    )
+    return MilesBackend(trainer, router_url, dp_size=dp_size), model_config
 
 
 if __name__ == "__main__":

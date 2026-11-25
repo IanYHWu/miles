@@ -20,10 +20,11 @@ def add_tinker_arguments(parser):
     )
     add_argument(
         "train-mode",
-        choices=["lora", "full"],
+        choices=["lora", "full", "none"],
         default="lora",
         help="What a training client trains: a LoRA adapter in one of --multi-lora-n-adapters slots, "
-        "or the served model's own weights, for one client at a time",
+        "the served model's own weights, for one client at a time, or nothing: the gateway starts no trainer "
+        "and only samples the base model, on every GPU",
     )
     return parser
 
@@ -33,6 +34,14 @@ def configure_tinker_args(args):
     assert args.exclude_modules is None, "Tinker selects complete training groups; --exclude-modules is not supported"
     if args.tinker_train_mode == "full":
         _validate_full_finetune_args(args)
+        return
+    if args.tinker_train_mode == "none":
+        assert not args.multi_lora_n_adapters and not is_lora_enabled(args) and args.target_modules is None, (
+            "--tinker-train-mode none samples only the base model; drop --multi-lora-n-adapters, --target-modules "
+            "and the LoRA flags"
+        )
+        # miles' rollout-only layout: no trainer GPUs, and engines serve the HF base without waiting for a push
+        args.debug_rollout_only = True
         return
     groups = parse_lora_targets(args.target_modules)
     if groups is None:
