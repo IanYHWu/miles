@@ -5,7 +5,7 @@ from contextlib import suppress
 import uvicorn
 
 from miles.backends.megatron_utils.megatron_config import compute_trainer_args
-from miles.ray.placement_group import create_trainer_handles
+from miles.ray.placement_group import create_trainer_handles, push_weights
 from miles.ray.rollout.router_manager import resolve_router_addrs
 from miles.ray.specs.inference import compute_router_providers, create_inference_controller_handle
 from miles.ray.specs.train import ACTOR_ROLE, compute_trainer_configs
@@ -58,6 +58,9 @@ async def serve(args, *, disposer: Disposer):
     disposer.add(trainer)
 
     if full_finetune:
+        # Engines that take weight updates join the router only after a push, and the gateway serves the base model
+        # from the start, before any client has saved a sampler: push the trainer's base weights once.
+        await push_weights(trainer, inference_controller)
         # one client at a time trains the served model's every weight
         model_config = dict(train_mode="full", n_slots=1, trains_attn=True, trains_mlp=True, trains_unembed=True)
     else:
