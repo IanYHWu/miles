@@ -59,6 +59,10 @@ class TinkerService:
         self._background_error: BaseException | None = None
         # why each model closed, so later requests get the reason instead of "unknown model"
         self._close_reasons: dict[str, str] = {}
+        # train_mode "full": the samplers the engines' weights are served to; None is the base model's
+        self._served_sampler_paths: set[str | None] = {None}
+        # train_mode "full": the model that made the latest push and has loaded no weights since
+        self._continuing_model_id: str | None = None
 
     async def run(self) -> None:
         sweep_task = asyncio.create_task(self._run_lease_sweeper())
@@ -133,11 +137,12 @@ class TinkerService:
         base_model = payload["base_model"]
         if base_model != self.config.base_model:
             raise UserInputError(f"this gateway serves {self.config.base_model!r}, not {base_model!r}")
-        lora_config = payload.get("lora_config") or {}
-        validate_model_config(lora_config, self.config)
-        rank = lora_config.get("rank", 32)
-        alpha = self.config.lora_alpha if self.config.lora_alpha is not None else float(2 * rank)
+        if self.config.train_mode == "none":
+            raise UserInputError("this gateway trains nothing; it only samples the base model")
+        rank, alpha = self._adapter_shape(payload.get("lora_config") or {})
         if not self.free_slots:
+            if self.config.train_mode == "full":
+                raise UserInputError("this full fine-tuning gateway trains one model at a time; it is in use")
             raise UserInputError(f"no free adapter slots (capacity {self.config.n_slots})")
         slot = min(self.free_slots)
         self.free_slots.remove(slot)
@@ -162,6 +167,19 @@ class TinkerService:
         task.add_done_callback(self._observe_background_task)
         session.models_by_seq[model_seq_id] = (future.request_id, model_id)
         return future.request_id, model_id
+
+    def _adapter_shape(self, lora_config: dict) -> tuple[int, float]:
+        """The new model's adapter rank and alpha; a full fine-tuning model has no adapter, so 0 and 0.0.
+
+        The SDK only creates LoRA training clients, so full fine-tuning takes and ignores their lora_config.
+        """
+        if self.config.train_mode == "full":
+            logger.info(f"train_mode=full: ignoring lora_config {lora_config}")
+            return 0, 0.0
+        validate_model_config(lora_config, self.config)
+        rank = lora_config.get("rank", 32)
+        alpha = self.config.lora_alpha if self.config.lora_alpha is not None else float(2 * rank)
+        return rank, alpha
 
     async def _run_create_model(self, record: ModelRecord) -> None:
         async with self._trainer_lock:
@@ -355,6 +373,8 @@ class TinkerService:
             source_tenant = record.tenant
         meta = read_checkpoint_metadata(checkpoint_dir, source_tenant, payload["path"])
         validate_checkpoint_compatibility(meta, record, self.config, payload["path"])
+        # the next push holds what this loads, so it starts new training
+        self._continuing_model_id = None
         failure = await self.backend.load_slot(
             record.slot,
             record.lora_rank,
@@ -376,6 +396,9 @@ class TinkerService:
         path = resolve_checkpoint_dir(self.config.checkpoint_root, record.model_id, "sampler_weights", version)
         if os.path.exists(path):
             raise UserInputError(f"sampler weights {version!r} already exist; save under a new name")
+        if self.config.train_mode == "full" and record.model_id != self._continuing_model_id:
+            # the push replaces the engines' weights with ones no served sampler names
+            self._served_sampler_paths = set()
         failure = await self.backend.export_slot(
             record.slot,
             record.lora_rank,
@@ -389,6 +412,9 @@ class TinkerService:
             "op": "save_weights_for_sampler",
             "path": f"tinker://{record.model_id}/sampler_weights/{version}",
         }
+        if self.config.train_mode == "full":
+            self._served_sampler_paths.add(result["path"])
+            self._continuing_model_id = record.model_id
         if payload.get("sampler_path") is None:
             # unnamed saves return a sampling session bound to the new version
             result["sampling_session_id"] = self._new_sampling_session(
@@ -467,6 +493,10 @@ class TinkerService:
                 sampling_session.samples_by_seq[seq_id] = (request_id, sequence_ids)
                 return request_id, sequence_ids
         validate_sample_payload(payload, self.config)
+        if self.config.train_mode == "none" and model_path:
+            raise UserInputError(f"this gateway trains nothing and samples only the base model, not {model_path!r}")
+        if self.config.train_mode == "full":
+            self._check_served(model_path)
         lora_name, lora_path = (
             resolve_sampler_checkpoint(self.config.checkpoint_root, tenant, model_path, self.config.base_model)
             if model_path
@@ -482,6 +512,21 @@ class TinkerService:
         if sampling_session is not None:
             sampling_session.samples_by_seq[seq_id] = (future.request_id, sequence_ids)
         return future.request_id, sequence_ids
+
+    def _check_served(self, model_path: str | None) -> None:
+        """Full fine-tuning engines hold one copy of the weights. The gateway serves it to the latest sampler save,
+        to that model's earlier saves when no load_state came between, and before any push to the base model; a
+        sample on an earlier save so starts on its weights or later ones. While a model's first push, or its first
+        after a load_state, runs, it serves no sampler."""
+        if not self._served_sampler_paths:
+            raise UserInputError(
+                "this full fine-tuning gateway serves no sampler until a push starting new training lands"
+            )
+        if model_path not in self._served_sampler_paths:
+            raise UserInputError(
+                "this full fine-tuning gateway serves its latest weights to their sampler, and to an earlier sampler "
+                f"only when no load_state or new model came between; not to {model_path or 'the base model'}"
+            )
 
     async def _run_sample(
         self,

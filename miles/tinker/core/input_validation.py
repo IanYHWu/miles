@@ -115,6 +115,7 @@ def validate_checkpoint_compatibility(meta: dict, record: ModelRecord, config: G
     """Reject settings that would change the saved tensors' meaning."""
     expected = {
         "base_model": record.base_model,
+        "train_mode": config.train_mode,
         "lora_rank": record.lora_rank,
         "lora_alpha": record.lora_alpha,
         "train_attn": config.trains_attn,
@@ -144,6 +145,7 @@ def validate_checkpoint_metadata(meta, shown_path: str) -> None:
     fields = {
         "tenant_digest": (str,),
         "base_model": (str,),
+        "train_mode": (str,),
         "lora_rank": (int,),
         "lora_alpha": (int, float),
         "train_attn": (bool,),
@@ -152,5 +154,8 @@ def validate_checkpoint_metadata(meta, shown_path: str) -> None:
     }
     if not isinstance(meta, dict) or any(type(meta.get(key)) not in types for key, types in fields.items()):
         raise UserInputError(f"checkpoint {shown_path!r} has invalid or unsupported metadata")
-    if meta["lora_rank"] <= 0 or not math.isfinite(meta["lora_alpha"]):
+    if meta["train_mode"] == "full":
+        if meta["lora_rank"] != 0 or meta["lora_alpha"] != 0:
+            raise UserInputError(f"checkpoint {shown_path!r} has invalid full fine-tuning metadata")
+    elif meta["train_mode"] != "lora" or meta["lora_rank"] <= 0 or not math.isfinite(meta["lora_alpha"]):
         raise UserInputError(f"checkpoint {shown_path!r} has invalid LoRA metadata")

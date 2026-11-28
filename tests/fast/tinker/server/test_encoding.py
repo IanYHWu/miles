@@ -5,6 +5,7 @@ from miles.tinker.server.encoding import (
     build_datum,
     decode_command,
     decode_sample_request,
+    model_input_tokens,
     render_result,
     tensor_data_to_list,
 )
@@ -102,3 +103,25 @@ class TestRenderResult:
         assert rendered["loss_fn_output_type"] == "ArrayRecord"
         assert rendered["metrics"] == {"loss:sum": 2.0}
         assert rendered["loss_fn_outputs"][0]["logprobs"] == {"dtype": "float32", "shape": [2], "data": [0.1, 0.2]}
+
+
+class TestRenderSamplerSave:
+    def test_a_named_save_answers_with_its_path(self):
+        rendered = render_result({"op": "save_weights_for_sampler", "path": "tinker://model-1/sampler_weights/ck"})
+        assert rendered == {"type": "save_weights_for_sampler", "path": "tinker://model-1/sampler_weights/ck"}
+
+    def test_an_unnamed_save_answers_with_its_sampling_session_alone(self):
+        """The SDK's save_weights_and_get_sampling_client asserts the path is None, before tinker 0.27."""
+        rendered = render_result(
+            {
+                "op": "save_weights_for_sampler",
+                "path": "tinker://model-1/sampler_weights/1",
+                "sampling_session_id": "s-1",
+            }
+        )
+        assert rendered == {"type": "save_weights_for_sampler", "path": None, "sampling_session_id": "s-1"}
+
+
+def test_a_chunk_naming_no_type_is_encoded_text():
+    """tinker before 0.27 omits a chunk's type when it is the default one."""
+    assert model_input_tokens({"chunks": [{"tokens": [1, 2]}, {"type": "encoded_text", "tokens": [3]}]}) == [1, 2, 3]

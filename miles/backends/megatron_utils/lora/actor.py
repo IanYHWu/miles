@@ -4,6 +4,7 @@ from miles.backends.megatron_utils.actor import MegatronTrainRayActor
 from miles.backends.megatron_utils.lora import checkpoint as lora_checkpoint
 from miles.backends.megatron_utils.lora import model as lora_model
 from miles.backends.megatron_utils.lora.optimizer import SlotOptimizer
+from miles.backends.megatron_utils.work_unit import run_forward_backward
 from miles.backends.training_utils.data.rollout import get_rollout_data
 from miles.utils.lora.utils import AdapterSpec
 from miles.utils.object_store import StoreObjectRef
@@ -21,7 +22,7 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
         with ExitStack() as stack:
             rollout_data, store_get_result = get_rollout_data(self.args, rollout_data_ref)
             stack.enter_context(store_get_result)
-            return lora_model.run_forward_backward(self.args, batch_id, self.model, rollout_data)
+            return run_forward_backward(self.args, batch_id, self.model, rollout_data)
 
     @with_logs
     def optim_step(self, adam_params_by_slot: dict[int, dict]) -> dict[int, dict]:
@@ -36,7 +37,7 @@ class MultiLoRATrainRayActor(MegatronTrainRayActor):
         with ExitStack() as stack:
             rollout_data, store_get_result = get_rollout_data(self.args, rollout_data_ref)
             stack.enter_context(store_get_result)
-            return lora_model.run_forward_backward(self.args, batch_id, self.model, rollout_data, forward_only=True)
+            return run_forward_backward(self.args, batch_id, self.model, rollout_data, forward_only=True)
 
     @with_logs
     def load_slot(

@@ -4,6 +4,8 @@ import asyncio
 
 import httpx
 
+from miles.backends.training_utils.checkpoint.io import write_checkpoint_dir
+from miles.ray.placement_group import push_weights
 from miles.ray.rollout.train_data_conversion import ROLLOUT_DATA_VALUE_SPEC
 from miles.tinker.core.types import UserInputError
 from miles.utils import object_store
@@ -24,7 +26,7 @@ def _pad_to_dp_multiple(slot_datums: list, dp_size: int) -> list:
     return slot_datums + [(slot, filler)] * (dp_size - remainder)
 
 
-def _build_train_data(slot_datums: list) -> dict:
+def _build_train_data(slot_datums: list, *, with_adapter_slots: bool) -> dict:
     """Miles response_lengths select label positions here, including prompt targets."""
     datums = [datum for _, datum in slot_datums]
     train_data = {
@@ -34,87 +36,21 @@ def _build_train_data(slot_datums: list) -> dict:
         "response_lengths": [datum["target_len"] for datum in datums],
         "total_lengths": [len(datum["tokens"]) for datum in datums],
         "sample_indices": list(range(len(datums))),
-        "adapter_slots": [slot for slot, _ in slot_datums],
         "dynamic_global_batch_size": len(datums),
     }
+    if with_adapter_slots:
+        train_data["adapter_slots"] = [slot for slot, _ in slot_datums]
     for datum_key, batch_key in DATUM_TO_BATCH_KEYS.items():
         if datum_key in datums[0]:
             train_data[batch_key] = [datum[datum_key] for datum in datums]
     return train_data
 
 
-class MilesBackend:
-    def __init__(self, trainer, router_url: str, dp_size: int = 1) -> None:
-        self.trainer = trainer
+class SamplingBackend:
+    """Samples the engines behind the router; trains nothing."""
+
+    def __init__(self, router_url: str) -> None:
         self.router_url = router_url
-        self.dp_size = dp_size
-
-    async def trainer_dead(self) -> bool:
-        return await self.trainer.has_errored_cell()
-
-    async def load_slot(
-        self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None, load_optimizer: bool = True
-    ) -> dict | None:
-        return _slot_failure(
-            await self.trainer.load_slot(slot, rank, alpha, ckpt_path=ckpt_path, load_optimizer=load_optimizer)
-        )
-
-    async def unload_slot(self, slot: int) -> dict | None:
-        return _slot_failure(await self.trainer.unload_slot(slot))
-
-    async def forward_backward(
-        self, batch_id: int, slot_datums: list, loss_fn: str, loss_fn_config: dict
-    ) -> list[dict] | dict:
-        return await self._execute_batch("forward_backward", batch_id, slot_datums, loss_fn, loss_fn_config)
-
-    async def forward_only(
-        self, batch_id: int, slot_datums: list, loss_fn: str, loss_fn_config: dict
-    ) -> list[dict] | dict:
-        return await self._execute_batch("forward_only", batch_id, slot_datums, loss_fn, loss_fn_config)
-
-    async def _execute_batch(
-        self, method: str, batch_id: int, slot_datums: list, loss_fn: str, loss_fn_config: dict
-    ) -> list[dict] | dict:
-        train_data = _build_train_data(_pad_to_dp_multiple(slot_datums, self.dp_size))
-        train_data["loss_fn"] = loss_fn
-        train_data["loss_fn_config"] = loss_fn_config
-        worker_results = await self._call_trainer(method, batch_id, train_data)
-        by_index: dict[int, dict] = {}
-        for worker_result in worker_results:
-            if "error" in worker_result:
-                return worker_result
-            for datum_output in worker_result["per_datum"]:
-                index = int(datum_output["sample_index"])
-                if index not in by_index:
-                    by_index[index] = {
-                        "loss": float(datum_output["loss"]),
-                        "logprobs": datum_output["logprobs"].tolist(),
-                    }
-        return [by_index[index] for index in range(len(slot_datums))]
-
-    async def _call_trainer(self, method: str, batch_id: int, train_data: dict) -> list:
-        store = object_store.get_instance()
-        data_ref = store.put(value=train_data, value_spec=ROLLOUT_DATA_VALUE_SPEC)
-        try:
-            return await getattr(self.trainer, method)(batch_id=batch_id, data_ref=data_ref)
-        finally:
-            store.remove(data_ref)
-
-    async def optim_step(self, adam_params_by_slot: dict[int, dict]) -> dict[int, dict]:
-        worker_results = await self.trainer.optim_step(adam_params_by_slot=adam_params_by_slot)
-        return worker_results[0]
-
-    async def save_slot(self, slot: int, path: str, metadata: dict | None = None) -> dict | None:
-        return _slot_failure(await self.trainer.save_slot(slot=slot, path=path, metadata=metadata))
-
-    async def export_slot(
-        self, slot: int, rank: int, alpha: float, path: str, metadata: dict | None = None
-    ) -> dict | None:
-        return _slot_failure(
-            await self.trainer.export_slot(slot=slot, rank=rank, alpha=alpha, path=path, metadata=metadata)
-        )
-
-    # -------- sampling --------
 
     async def sample(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
         request = self._generate_request(payload, lora_name, lora_path)
@@ -171,6 +107,107 @@ class MilesBackend:
                 # request-carried backfill source: the engine refills an evicted version itself
                 request["lora_backfill_paths"] = {lora_name: lora_path}
         return request
+
+
+class MilesBackend(SamplingBackend):
+    # the trainer routes each datum to its model's adapter slot
+    with_adapter_slots = True
+
+    def __init__(self, trainer, router_url: str, dp_size: int = 1) -> None:
+        super().__init__(router_url)
+        self.trainer = trainer
+        self.dp_size = dp_size
+
+    async def trainer_dead(self) -> bool:
+        return await self.trainer.has_errored_cell()
+
+    async def load_slot(
+        self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None, load_optimizer: bool = True
+    ) -> dict | None:
+        return _slot_failure(
+            await self.trainer.load_slot(slot, rank, alpha, ckpt_path=ckpt_path, load_optimizer=load_optimizer)
+        )
+
+    async def unload_slot(self, slot: int) -> dict | None:
+        return _slot_failure(await self.trainer.unload_slot(slot))
+
+    async def forward_backward(
+        self, batch_id: int, slot_datums: list, loss_fn: str, loss_fn_config: dict
+    ) -> list[dict] | dict:
+        return await self._execute_batch("forward_backward", batch_id, slot_datums, loss_fn, loss_fn_config)
+
+    async def forward_only(
+        self, batch_id: int, slot_datums: list, loss_fn: str, loss_fn_config: dict
+    ) -> list[dict] | dict:
+        return await self._execute_batch("forward_only", batch_id, slot_datums, loss_fn, loss_fn_config)
+
+    async def _execute_batch(
+        self, method: str, batch_id: int, slot_datums: list, loss_fn: str, loss_fn_config: dict
+    ) -> list[dict] | dict:
+        train_data = _build_train_data(
+            _pad_to_dp_multiple(slot_datums, self.dp_size), with_adapter_slots=self.with_adapter_slots
+        )
+        train_data["loss_fn"] = loss_fn
+        train_data["loss_fn_config"] = loss_fn_config
+        worker_results = await self._call_trainer(method, batch_id, train_data)
+        by_index: dict[int, dict] = {}
+        for worker_result in worker_results:
+            if "error" in worker_result:
+                return worker_result
+            for datum_output in worker_result["per_datum"]:
+                index = int(datum_output["sample_index"])
+                if index not in by_index:
+                    by_index[index] = {
+                        "loss": float(datum_output["loss"]),
+                        "logprobs": datum_output["logprobs"].tolist(),
+                    }
+        return [by_index[index] for index in range(len(slot_datums))]
+
+    async def _call_trainer(self, method: str, batch_id: int, train_data: dict) -> list:
+        store = object_store.get_instance()
+        data_ref = store.put(value=train_data, value_spec=ROLLOUT_DATA_VALUE_SPEC)
+        try:
+            return await getattr(self.trainer, method)(batch_id=batch_id, data_ref=data_ref)
+        finally:
+            store.remove(data_ref)
+
+    async def optim_step(self, adam_params_by_slot: dict[int, dict]) -> dict[int, dict]:
+        worker_results = await self.trainer.optim_step(adam_params_by_slot=adam_params_by_slot)
+        return worker_results[0]
+
+    async def save_slot(self, slot: int, path: str, metadata: dict | None = None) -> dict | None:
+        return _slot_failure(await self.trainer.save_slot(slot=slot, path=path, metadata=metadata))
+
+    async def export_slot(
+        self, slot: int, rank: int, alpha: float, path: str, metadata: dict | None = None
+    ) -> dict | None:
+        return _slot_failure(
+            await self.trainer.export_slot(slot=slot, rank=rank, alpha=alpha, path=path, metadata=metadata)
+        )
+
+
+class FullFinetuneBackend(MilesBackend):
+    """Slot 0 is the served model's own weights; the engines hold one copy of them.
+
+    A sampler save pushes the trained weights to the engines and records only its metadata.
+    """
+
+    with_adapter_slots = False
+
+    def __init__(self, trainer, router_url: str, inference_controller, dp_size: int = 1) -> None:
+        super().__init__(trainer, router_url, dp_size=dp_size)
+        self.inference_controller = inference_controller
+
+    async def export_slot(
+        self, slot: int, rank: int, alpha: float, path: str, metadata: dict | None = None
+    ) -> dict | None:
+        await push_weights(self.trainer, self.inference_controller)
+        write_checkpoint_dir(path, lambda _checkpoint_dir: None, metadata=metadata)
+        return None
+
+    async def sample(self, payload: dict, lora_name: str | None, lora_path: str | None = None) -> dict:
+        # whichever sampler the service admits, the engines serve their one copy of the weights, under no adapter
+        return await super().sample(payload, None)
 
 
 def _slot_failure(worker_results: list) -> dict | None:

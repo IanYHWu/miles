@@ -186,16 +186,6 @@ class SlotOptimizer:
                 main_param.grad = None
 
 
-def reset_grad_metadata_keep_grads(model_chunks) -> None:
-    """Reset DDP bookkeeping while retaining each slot's gradient accumulation window."""
-    for model_chunk in model_chunks:
-        if getattr(model_chunk.config, "cuda_graph_impl", "none") != "transformer_engine":
-            for param in model_chunk.params_with_grad:
-                param.grad_added_to_main_grad = False
-        for bucket_group in model_chunk.bucket_groups + model_chunk.expert_parallel_bucket_groups:
-            bucket_group.reset()
-
-
 def step_slot_optimizers(
     slot_optimizers: dict[int, SlotOptimizer],
     adam_params_by_slot: dict[int, dict],

@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 
 from miles.backends.training_utils.data.context_parallel import get_local_response_loss_masks, slice_log_prob_with_cp
+from miles.backends.training_utils.loss.hub.lm_head import LMHeadInputs, zero_loss_anchor
 from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.types import RolloutBatch
@@ -113,14 +114,14 @@ def _gather_per_datum_outputs(
 def _sum_loss_and_outputs(
     args: Namespace,
     batch: RolloutBatch,
-    logits: torch.Tensor,
+    logits: torch.Tensor | LMHeadInputs,
     log_probs: list[torch.Tensor],
     per_datum_losses: list[torch.Tensor],
 ) -> tuple[torch.Tensor, dict]:
     if any(log_prob.numel() for log_prob in log_probs):
         loss = torch.stack(per_datum_losses).sum()
     else:
-        loss = logits[..., :0].sum(dtype=torch.float32)  # zero, but still connected to logits for backward
+        loss = zero_loss_anchor(logits)
     per_datum = _gather_per_datum_outputs(args, batch, log_probs, per_datum_losses)
     return loss, {"loss": loss.detach(), "per_datum": per_datum}
 

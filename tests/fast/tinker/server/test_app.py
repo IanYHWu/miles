@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 import pytest
-from tests.fast.tinker.harness import ADAM
+from tests.fast.tinker.harness import ADAM, make_service
 
 from miles.tinker.server.app import build_app
 
@@ -82,7 +82,9 @@ async def test_the_training_conversation(client):
 
     sampler = (
         await client.post(
-            "/api/v1/save_weights_for_sampler", json={"model_id": model_id, "seq_id": 3}, headers=_headers()
+            "/api/v1/save_weights_for_sampler",
+            json={"model_id": model_id, "seq_id": 3, "path": "after-step"},
+            headers=_headers(),
         )
     ).json()
     sampler_path = (await _poll(client, sampler["request_id"]))["path"]
@@ -137,6 +139,13 @@ async def test_capabilities_and_telemetry_shapes(client):
     capabilities = (await client.get("/api/v1/get_server_capabilities")).json()
     assert capabilities["supported_models"][0]["model_name"] == "base"
     assert (await client.post("/api/v1/telemetry", json={})).json() == {"status": "accepted"}
+
+
+async def test_a_gateway_that_trains_nothing_says_its_model_is_not_trainable(tmp_path):
+    transport = httpx.ASGITransport(app=build_app(make_service(tmp_path, train_mode="none", n_slots=0)))
+    async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as http:
+        capabilities = (await http.get("/api/v1/get_server_capabilities")).json()
+    assert capabilities["supported_models"][0]["trainable"] is False
 
 
 async def test_a_request_without_an_api_key_is_rejected(client):

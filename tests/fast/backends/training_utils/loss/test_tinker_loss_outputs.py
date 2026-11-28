@@ -7,6 +7,7 @@ import torch
 
 from miles.backends.training_utils.loss import objective as loss_module
 from miles.backends.training_utils.loss.hub import tinker_losses
+from miles.backends.training_utils.loss.hub.lm_head import LMHeadInputs
 
 from .loss_test_utils import make_parallel_state
 
@@ -142,3 +143,69 @@ def test_nonzero_objectives_and_gradients(monkeypatch, recompute, loss_fn, confi
     torch.testing.assert_close(torch.stack([output["loss"] for output in outputs]), expected_losses)
     torch.testing.assert_close(torch.cat([output["logprobs"] for output in outputs]), logprobs.detach())
     assert all(not output["loss"].requires_grad and not output["logprobs"].requires_grad for output in outputs)
+
+
+def test_a_tinker_loss_is_an_exact_sum_without_multi_lora(monkeypatch):
+    """A full fine-tuning gateway trains no adapters; its Tinker losses still carry the client's normalization."""
+    make_parallel_state()
+    monkeypatch.setattr(loss_module, "get_sum_of_sample_mean", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tinker_losses, "_target_logprobs", lambda _args, _batch, logits: [logits])
+    args = Namespace(
+        log_probs_backend="torch",
+        calculate_per_token_loss=False,
+        qkv_format="thd",
+        recompute_loss_function=False,
+        use_dynamic_global_batch_size=True,
+        global_batch_size=4,
+        multi_lora=False,
+    )
+    logprobs = torch.tensor([-0.5, -0.25], requires_grad=True)
+    batch = {
+        "loss_fn": "cross_entropy",
+        "loss_weights": [[2.0, 3.0]],
+        "loss_masks": [torch.ones(2)],
+        "total_lengths": [3],
+        "response_lengths": [2],
+        "sample_indices": [0],
+        "dynamic_global_batch_size": 4,
+    }
+
+    loss, _, _ = loss_module.loss_function(args, batch, 1, logprobs)
+    loss.backward()
+
+    assert loss.item() == pytest.approx(1.75)
+    assert logprobs.grad.tolist() == [-2.0, -3.0]
+
+
+class _Projection:
+    """A single-rank output layer: the fused LM head's input projects through it a row at a time."""
+
+    tp_group = None
+    logits_dtype = "model"
+
+    def __init__(self, weight: torch.Tensor) -> None:
+        self.weight = weight
+
+    def gather_sequence(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states
+
+    def project(self, hidden_rows: torch.Tensor) -> torch.Tensor:
+        return hidden_rows @ self.weight.T
+
+    def track_weight_grad(self, hidden_rows: torch.Tensor) -> torch.Tensor:
+        return hidden_rows
+
+
+def test_a_rank_with_nothing_to_score_still_reaches_the_fused_lm_head():
+    """Under --log-probs-backend fused_lm_head a Tinker loss sees hidden states, not logits; a rank whose rows are
+    all prompt must still send a backward through the output layer, or the ranks that scored something hang."""
+    hidden_states = torch.randn(4, 1, 3, requires_grad=True)
+    weight = torch.randn(5, 3, requires_grad=True)
+
+    loss, logging = tinker_losses._sum_loss_and_outputs(
+        Namespace(), {}, LMHeadInputs(hidden_states, _Projection(weight)), log_probs=[], per_datum_losses=[]
+    )
+    loss.backward()
+
+    assert loss.item() == 0.0 and logging["per_datum"] == []
+    assert weight.grad is not None and hidden_states.grad is not None
